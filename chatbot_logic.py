@@ -1,40 +1,22 @@
 from typing import Dict, Any, List, Optional
 
 def find_entity(text: str, entities: List[str]) -> Optional[str]:
-    """Finds the first matching entity in the text (case-insensitive).
-       Sorts entities by length descending to match longer names first.
-    """
     text_lower = text.lower()
-    # Sort entities by length descending to match longer names first (e.g., "Sales Order" before "Sales")
-    # This helps in scenarios where one entity name is a substring of another.
     sorted_entities = sorted(entities, key=len, reverse=True)
     for entity in sorted_entities:
-        if entity.lower() in text_lower: 
-            return entity
+        if entity.lower() in text_lower: return entity
     return None
 
 def find_entities_in_query(text: str, entity_list: List[str]) -> List[str]:
-    """Finds all occurrences of entities from entity_list in text (case-insensitive).
-       Attempts to avoid re-matching parts of already found longer entities.
-    """
-    found_entities = []
-    text_lower = text.lower()
-    # Sort entities by length descending to match longer names first
+    found_entities = []; text_lower = text.lower()
     sorted_entities = sorted(entity_list, key=len, reverse=True)
-    
-    # Create a mutable copy of the text to mark found entities to avoid re-matching substrings
-    # This is a simple approach and might not be perfect for all overlapping cases.
     temp_text_lower = text_lower
-    
     for entity_name in sorted_entities:
         entity_lower = entity_name.lower()
         if entity_lower in temp_text_lower:
             found_entities.append(entity_name)
-            # Replace found entity to prevent re-matching its parts by shorter entities later
-            # Using a placeholder that's unlikely to be part of other entity names
             temp_text_lower = temp_text_lower.replace(entity_lower, "###FOUND###", 1) 
-            
-    return list(set(found_entities)) # Return unique entities found
+    return list(set(found_entities))
 
 def get_all_table_names(metadata: Dict[str, Any]) -> List[str]:
     return [table['name'] for table in metadata.get('tables', []) if table.get('name')]
@@ -49,9 +31,7 @@ def get_simple_names_from_qualified(qualified_names: List[str]) -> List[str]:
     return list(set(name.split('.')[-1] for name in qualified_names if name and '.' in name))
 
 def get_global_measure_names(qualified_names: List[str]) -> List[str]:
-    """Identifies measure names that do not have a table prefix."""
     return list(set(name for name in qualified_names if name and '.' not in name))
-
 
 def get_all_column_names_from_tables_qualified(metadata: Dict[str, Any]) -> List[str]:
     qualified_cols = []
@@ -60,309 +40,160 @@ def get_all_column_names_from_tables_qualified(metadata: Dict[str, Any]) -> List
         if table_name:
             for col in table.get('columns', []):
                 col_name = col.get('name')
-                if col_name:
-                    qualified_cols.append(f"{table_name}.{col_name}")
+                if col_name: qualified_cols.append(f"{table_name}.{col_name}")
     return list(set(qualified_cols))
 
 def get_all_page_names(metadata: Dict[str, Any]) -> List[str]:
     return [page['name'] for page in metadata.get('report_pages', []) if page.get('name')]
 
+def get_tables_with_m_queries(metadata: Dict[str, Any]) -> List[str]:
+    return list(set(mq.get("table_name") for mq in metadata.get("m_queries", []) if mq.get("table_name")))
 
 def process_query(query: str, metadata: Dict[str, Any]) -> str:
     query_lower = query.lower()
-
     table_names = get_all_table_names(metadata)
-    
+    tables_with_m = get_tables_with_m_queries(metadata)
     qualified_measure_names = get_all_measure_names_qualified(metadata)
     simple_measure_names_from_qualified = get_simple_names_from_qualified(qualified_measure_names)
     global_measure_names = get_global_measure_names(qualified_measure_names)
     all_simple_measure_names_for_search = list(set(simple_measure_names_from_qualified + global_measure_names))
-
     qualified_cc_names = get_all_cc_names_qualified(metadata)
     simple_cc_names = get_simple_names_from_qualified(qualified_cc_names)
-    
     qualified_table_column_names = get_all_column_names_from_tables_qualified(metadata)
     simple_table_column_names = get_simple_names_from_qualified(qualified_table_column_names)
-
     all_known_qualified_fields = list(set(qualified_measure_names + qualified_cc_names + qualified_table_column_names))
     all_known_simple_fields = list(set(all_simple_measure_names_for_search + simple_cc_names + simple_table_column_names))
-
     page_names = get_all_page_names(metadata)
 
-    # --- Intent: List all tables ---
-    if "list tables" in query_lower or "show tables" in query_lower:
-        if table_names:
-            return "Tables in this PBIT file:\n" + "\n".join([f"- {name}" for name in table_names])
-        return "No table information found in the PBIT file."
+    # M Query Intents
+    if "list m queries" in query_lower or "show m queries" in query_lower or "which tables have m queries" in query_lower:
+        if tables_with_m: return "Tables with M (Power Query) scripts:\n" + "\n".join([f"- {name}" for name in sorted(tables_with_m)])
+        return "No M (Power Query) scripts were found."
+    if "m query for table" in query_lower or "show m script for" in query_lower or "power query for" in query_lower or "get m for" in query_lower:
+        table_name_match_m = find_entity(query, tables_with_m)
+        if table_name_match_m:
+            for mq in metadata.get("m_queries", []):
+                if mq.get("table_name", "").lower() == table_name_match_m.lower():
+                    analysis = mq.get("analysis", {})
+                    sources = analysis.get("sources", [])
+                    transforms = analysis.get("transformations", [])
+                    resp = f"M Query for table '{table_name_match_m}':\n"
+                    resp += f"  Identified Sources: {', '.join(sources) if sources else 'None identified'}\n"
+                    resp += f"  Common Transformations: {', '.join(transforms) if transforms else 'None identified'}\n\n"
+                    resp += "```m\n" + mq.get("script", "Error: Script not found.") + "\n```"
+                    return resp
+            return f"M Query info for '{table_name_match_m}' not found despite expectation."
+        general_table_match = find_entity(query, table_names)
+        if general_table_match: return f"Table '{general_table_match}' found, but no M script associated in parsed data."
+        return "Which table's M script? Ex: 'm query for table SalesData'"
 
-    # --- Intent: Describe a table (list columns) ---
-    if "describe table" in query_lower or "what columns in" in query_lower or "show columns for" in query_lower:
-        table_name_match = find_entity(query, table_names)
-        if table_name_match:
-            for table in metadata.get("tables", []):
-                if table.get("name","").lower() == table_name_match.lower():
-                    cols = [f"- {c.get('name','N/A')} ({c.get('dataType','N/A')})" for c in table.get("columns",[])]
-                    if not cols: return f"Table '{table_name_match}' has no columns defined or they could not be parsed."
-                    return f"Columns in table '{table_name_match}':\n" + "\n".join(cols)
-            return f"Table '{table_name_match}' not found."
-        return "Which table are you asking about? Example: 'describe table Sales'"
-
-    # --- Intent: List all measures ---
-    if "list measures" in query_lower or "show measures" in query_lower:
-        if qualified_measure_names:
-            return "Measures (format: Table.MeasureName or MeasureName if global):\n" + "\n".join([f"- {name}" for name in qualified_measure_names])
-        return "No measures found in the PBIT file."
-
-    # --- Intent: Get DAX formula for a measure ---
-    if "what is the formula for" in query_lower or "show dax for" in query_lower or "formula of measure" in query_lower:
-        # Try matching fully qualified "Table.Measure" or global "Measure"
-        target_measure_key = find_entity(query, qualified_measure_names) 
-        
-        if not target_measure_key: # If not found, try simple measure name (from qualified ones)
-            simple_measure_match = find_entity(query, simple_measure_names_from_qualified)
-            if simple_measure_match:
-                # Find the full key(s) that end with this simple name
-                possible_keys = [k for k in qualified_measure_names if k.lower().endswith(f".{simple_measure_match.lower()}")]
-                if len(possible_keys) == 1:
-                    target_measure_key = possible_keys[0]
-                elif len(possible_keys) > 1:
-                    return f"Measure '{simple_measure_match}' is ambiguous. Found as: {', '.join(possible_keys)}. Please specify fully (e.g., 'formula for TableName.{simple_measure_match}')."
-        
-        if target_measure_key and target_measure_key in metadata.get("measures", {}):
-            return f"DAX formula for measure '{target_measure_key}':\n{metadata['measures'][target_measure_key]}"
-        
-        # If any measure-like term was in query but not resolved:
-        if find_entity(query, all_simple_measure_names_for_search + qualified_measure_names):
-             return f"Measure not found or its formula is not available. Please be specific (e.g. 'Table.MeasureName' or 'MeasureName' if unique)."
-        return "Which measure are you asking about? Example: 'formula for Total Sales' or 'formula for Sales.Total Sales'"
-    
-    # --- Intent: List all calculated columns ---
-    if "list calculated columns" in query_lower or "show calculated columns" in query_lower:
-        if qualified_cc_names:
-            return "Calculated Columns (format: Table.ColumnName):\n" + "\n".join([f"- {name}: {metadata['calculated_columns'][name]}" for name in qualified_cc_names])
-        return "No calculated columns found."
-
-    # --- Intent: Get DAX for a calculated column ---
+    # Existing Intents
+    if "list tables" in query_lower:
+        if table_names: return "Tables:\n" + "\n".join([f"- {name}" for name in table_names]); return "No tables."
+    if "describe table" in query_lower or "what columns in" in query_lower:
+        tbl_match = find_entity(query, table_names)
+        if tbl_match:
+            for t in metadata.get("tables",[]): 
+                if t.get("name","").lower()==tbl_match.lower(): 
+                    cols = [f"- {c.get('name','?')}({c.get('dataType','?')})" for c in t.get("columns",[])]; 
+                    return f"Cols in '{tbl_match}':\n"+"\n".join(cols) if cols else f"No cols in '{tbl_match}'."
+            return f"Table '{tbl_match}' not found."
+        return "Which table to describe?"
+    if "list measures" in query_lower:
+        if qualified_measure_names: return "Measures:\n" + "\n".join([f"- {name}" for name in qualified_measure_names]); return "No measures."
+    if "formula for measure" in query_lower or "show dax for" in query_lower:
+        target_m_key = find_entity(query, qualified_measure_names)
+        if not target_m_key:
+            s_m_match = find_entity(query, all_simple_measure_names_for_search)
+            if s_m_match:
+                p_keys = [k for k in qualified_measure_names if k.lower().endswith(f".{s_m_match.lower()}") or k.lower() == s_m_match.lower()]
+                if len(p_keys) == 1: target_m_key = p_keys[0]
+                elif len(p_keys) > 1: return f"Ambiguous measure '{s_m_match}'. Options: {', '.join(p_keys)}"
+        if target_m_key and target_m_key in metadata.get("measures",{}): return f"DAX for '{target_m_key}':\n{metadata['measures'][target_m_key]}"
+        if find_entity(query, all_simple_measure_names_for_search + qualified_measure_names): return "Measure not found."
+        return "Which measure for formula?"
+    if "list calculated columns" in query_lower:
+        if qualified_cc_names: return "Calc Cols:\n" + "\n".join([f"- {n}: {metadata['calculated_columns'][n]}" for n in qualified_cc_names]); return "No calc cols."
     if "formula for calculated column" in query_lower or "dax for column" in query_lower:
         target_cc_key = find_entity(query, qualified_cc_names)
-        
         if not target_cc_key:
-            simple_cc_match = find_entity(query, simple_cc_names)
-            if simple_cc_match:
-                possible_keys = [k for k in qualified_cc_names if k.lower().endswith(f".{simple_cc_match.lower()}")]
-                if len(possible_keys) == 1:
-                    target_cc_key = possible_keys[0]
-                elif len(possible_keys) > 1:
-                    return f"Calculated column '{simple_cc_match}' is ambiguous. Found as: {', '.join(possible_keys)}. Please specify fully (e.g., 'formula for calculated column TableName.{simple_cc_match}')."
-
-        if target_cc_key and target_cc_key in metadata.get('calculated_columns', {}):
-            return f"DAX for calculated column '{target_cc_key}':\n{metadata['calculated_columns'][target_cc_key]}"
-        
-        if find_entity(query, simple_cc_names + qualified_cc_names):
-            return f"Calculated column not found or its formula is not available. Please specify as 'TableName.ColumnName'."
-        return "Which calculated column? (e.g., 'formula for calculated column Sales.Profit')"
-
-    # --- Intent: List relationships (all or for a specific table) ---
+            s_cc_match = find_entity(query, simple_cc_names)
+            if s_cc_match:
+                p_keys = [k for k in qualified_cc_names if k.lower().endswith(f".{s_cc_match.lower()}")]
+                if len(p_keys) == 1: target_cc_key = p_keys[0]
+                elif len(p_keys) > 1: return f"Ambiguous calc col '{s_cc_match}'. Options: {', '.join(p_keys)}"
+        if target_cc_key and target_cc_key in metadata.get("calculated_columns",{}): return f"DAX for calc col '{target_cc_key}':\n{metadata['calculated_columns'][target_cc_key]}"
+        if find_entity(query, simple_cc_names + qualified_cc_names): return "Calc col not found."
+        return "Which calc col for formula?"
     if "list relationships" in query_lower or "show relationships" in query_lower or "relationships of" in query_lower or "relationships for table" in query_lower:
-        all_relationships = metadata.get("relationships", [])
-        if not all_relationships:
-            return "No relationships found in the PBIT file."
-
-        table_name_match_for_rel = find_entity(query, table_names)
-        
-        relevant_relationships = []
-        response_header = "Relationships"
-
-        if table_name_match_for_rel:
-            response_header = f"Relationships involving table '{table_name_match_for_rel}'"
-            for r in all_relationships:
-                if (r.get('fromTable','').lower() == table_name_match_for_rel.lower() or 
-                    r.get('toTable','').lower() == table_name_match_for_rel.lower()):
-                    relevant_relationships.append(r)
-            if not relevant_relationships:
-                return f"No relationships found involving table '{table_name_match_for_rel}'."
-        else: 
-            # If query structure implies specific table but name is missing
+        all_rels = metadata.get("relationships", [])
+        if not all_rels: return "No relationships found."
+        tbl_match_rel = find_entity(query, table_names); rel_rels = []; hdr = "Relationships"
+        if tbl_match_rel:
+            hdr = f"Relationships for '{tbl_match_rel}'"
+            for r in all_rels:
+                if (r.get('fromTable','').lower() == tbl_match_rel.lower() or r.get('toTable','').lower() == tbl_match_rel.lower()): rel_rels.append(r)
+            if not rel_rels: return f"No relationships for '{tbl_match_rel}'."
+        else:
             if "relationships of" in query_lower or "relationships for table" in query_lower:
-                 # Check if *any* table name was found, even if it didn't become table_name_match_for_rel
-                 # This handles cases like "relationships of Sales and Products" - find_entity might pick one.
-                 # If no table name at all, then ask.
-                 potential_tables_in_query = find_entities_in_query(query, table_names)
-                 if not potential_tables_in_query:
-                    return "Which table's relationships are you interested in? Example: 'list relationships for Sales table'."
-            # Otherwise, list all (e.g., for "list relationships")
-            relevant_relationships = all_relationships
-            
-        rels_text = [
-            f"- From '{r.get('fromTable','?')}.{r.get('fromColumn','?')}' To '{r.get('toTable','?')}.{r.get('toColumn','?')}' (Active: {r.get('isActive', 'N/A')}, Filter: {r.get('crossFilteringBehavior', 'N/A')})"
-            for r in relevant_relationships
-        ]
-        return f"{response_header}:\n" + "\n".join(rels_text)
-
-    # --- Intent: List pages ---
-    if "list pages" in query_lower or "show pages" in query_lower:
-        if page_names:
-            return "Report Pages:\n" + "\n".join([f"- {name}" for name in page_names])
-        return "No report pages found."
-    
-    # --- Intent: List visuals on a page ---
+                 if not find_entities_in_query(query, table_names): return "Which table for relationships?"
+            rel_rels = all_rels
+        rels_txt = [f"- From '{r.get('fromTable','?')}.{r.get('fromColumn','?')}' To '{r.get('toTable','?')}.{r.get('toColumn','?')}' (Active: {r.get('isActive', '?')}, Filter: {r.get('crossFilteringBehavior', '?')})" for r in rel_rels]
+        return f"{hdr}:\n" + "\n".join(rels_txt)
+    if "list pages" in query_lower:
+        if page_names: return "Pages:\n" + "\n".join([f"- {n}" for n in page_names]); return "No pages."
     if "visuals on page" in query_lower or "what visuals are on" in query_lower:
-        page_name_match = find_entity(query, page_names)
-        if page_name_match:
-            for page in metadata.get("report_pages", []):
-                if page.get("name","").lower() == page_name_match.lower():
-                    visuals = page.get("visuals", [])
-                    if visuals:
-                        vis_info = [f"  - Type: {v.get('type','N/A')}, Title: {v.get('title', 'N/A')}, Fields: {', '.join(v.get('fields_used',[])) if v.get('fields_used') else 'N/A'}" for v in visuals]
-                        return f"Visuals on page '{page_name_match}':\n" + "\n".join(vis_info)
-                    return f"No visuals found on page '{page_name_match}'."
-            return f"Page '{page_name_match}' not found."
-        return "Which page are you asking about? Example: 'visuals on page Sales Overview'"
+        pg_match = find_entity(query, page_names)
+        if pg_match:
+            for p in metadata.get("report_pages",[]):
+                if p.get("name","").lower() == pg_match.lower():
+                    vs = p.get("visuals",[])
+                    if vs: v_info = [f"  - Type: {v.get('type','?')}, Title: {v.get('title','N/A')}, Fields: {', '.join(v.get('fields_used',[])) if v.get('fields_used') else 'N/A'}" for v in vs]; return f"Visuals on '{pg_match}':\n" + "\n".join(v_info)
+                    return f"No visuals on '{pg_match}'."
+            return f"Page '{pg_match}' not found."
+        return "Which page for visuals?"
+    if "where is column" in query_lower or "where is measure" in query_lower or "visuals use field" in query_lower or "which visuals use" in query_lower:
+        s_f_q = find_entity(query, all_known_qualified_fields); s_f_s = None
+        if not s_f_q: s_f_s = find_entity(query, all_known_simple_fields)
+        f_t_s_f_l = None; s_t_d = None
+        if s_f_q: f_t_s_f_l = s_f_q.lower(); s_t_d = s_f_q
+        elif s_f_s:
+            p_q_m = [qf for qf in all_known_qualified_fields if qf.lower().endswith(f".{s_f_s.lower()}") or qf.lower() == s_f_s.lower()]
+            if len(p_q_m) == 1: f_t_s_f_l = p_q_m[0].lower(); s_t_d = p_q_m[0]
+            elif len(p_q_m) > 1: return f"Ambiguous field '{s_f_s}'. Options: {', '.join(p_q_m)}"
+            else: f_t_s_f_l = s_f_s.lower(); s_t_d = s_f_s
+        if not f_t_s_f_l: return "Which field for usage?"
+        res = []
+        for p in metadata.get("report_pages", []):
+            for v in p.get("visuals", []):
+                for f_i_v_p in v.get("fields_used", []):
+                    f_i_v_l = f_i_v_p.lower()
+                    if f_t_s_f_l == f_i_v_l or (not '.' in f_t_s_f_l and f_i_v_l.endswith(f".{f_t_s_f_l}")) or ('.' in f_t_s_f_l and f_i_v_l == f_t_s_f_l.split('.')[-1]):
+                        v_id = f"'{v.get('title', v.get('type', '?'))}' on page '{p.get('name','?')}'"; f_txt = f"- Field '{s_t_d}' (as '{f_i_v_p}') in visual {v_id}."
+                        if f_txt not in res: res.append(f_txt)
+        if res: return f"Usage of '{s_t_d}':\n" + "\n".join(res)
+        return f"Field '{s_t_d}' not found in visuals."
 
-    # --- Intent: Where is a field (column/measure) used in visuals? ---
-    if "where is column" in query_lower or "where is measure" in query_lower or \
-       "visuals use field" in query_lower or "which visuals use" in query_lower:
-        
-        # Try to find a qualified name first
-        searched_field_qualified = find_entity(query, all_known_qualified_fields)
-        
-        # If not found, or if found but query might be for a simple name, also check simple names
-        searched_field_simple = find_entity(query, all_known_simple_fields)
-
-        field_to_search_final_lower = None
-        search_term_display = None
-
-        if searched_field_qualified:
-            # If a qualified name is found, it's usually more specific
-            field_to_search_final_lower = searched_field_qualified.lower()
-            search_term_display = searched_field_qualified
-        elif searched_field_simple:
-            # If only a simple name was found, try to resolve it to a unique qualified field
-            possible_qualified_matches = [
-                qf for qf in all_known_qualified_fields 
-                if qf.lower().endswith(f".{searched_field_simple.lower()}") or qf.lower() == searched_field_simple.lower() # for global measures
-            ]
-            if len(possible_qualified_matches) == 1:
-                field_to_search_final_lower = possible_qualified_matches[0].lower()
-                search_term_display = possible_qualified_matches[0] 
-            elif len(possible_qualified_matches) > 1:
-                return (f"Field '{searched_field_simple}' is ambiguous. It could refer to: "
-                        f"{', '.join(possible_qualified_matches)}. Please be more specific (e.g., 'TableName.{searched_field_simple}' or '{searched_field_simple}' if global).")
-            else: # Simple name in query, but no mapping (e.g., user typed just "Amount")
-                  # We will search for this simple name directly against visual fields.
-                field_to_search_final_lower = searched_field_simple.lower()
-                search_term_display = searched_field_simple
-        
-        if not field_to_search_final_lower:
-            return "Which column or measure are you asking about? Example: 'where is column Sales.Amount used?' or 'which visuals use measure Total Sales?'"
-
-        results = []
-        for page in metadata.get("report_pages", []):
-            for visual in page.get("visuals", []):
-                for field_in_visual_parsed in visual.get("fields_used", []):
-                    field_in_visual_lower = field_in_visual_parsed.lower()
-                    
-                    # Match conditions:
-                    # 1. Exact match: user_search == visual_field
-                    # 2. User search is simple, visual_field is qualified and ends with simple: Sales.Amount vs Amount
-                    # 3. User search is qualified, visual_field is simple and is end of qualified: Amount vs Sales.Amount (less common for columns, more for measures)
-                    # 4. User search is simple, visual_field is simple and they match: Amount vs Amount
-                    if field_to_search_final_lower == field_in_visual_lower or \
-                       (not '.' in field_to_search_final_lower and field_in_visual_lower.endswith(f".{field_to_search_final_lower}")) or \
-                       ('.' in field_to_search_final_lower and field_in_visual_lower == field_to_search_final_lower.split('.')[-1]):
-                        
-                        visual_identifier = f"'{visual.get('title', visual.get('type', 'Unknown type'))}' on page '{page.get('name','Unknown Page')}'"
-                        found_text = f"- Field '{search_term_display}' (found as '{field_in_visual_parsed}') is used in visual {visual_identifier}."
-                        if found_text not in results:
-                             results.append(found_text)
-
-        if results:
-            return f"Usage of field '{search_term_display}':\n" + "\n".join(results)
-        return f"Field '{search_term_display}' not found in any visuals using that specific term, or the visual parsing couldn't identify it. Parsed fields are expected as 'Table.Column' or 'MeasureName'."
-
-    # --- Fallback ---
-    return (
-        "Sorry, I didn't understand that. Try asking things like:\n"
-        "- List tables\n"
-        "- Describe table 'Table Name'\n"
-        "- List measures\n"
-        "- Formula for measure 'Measure Name' or 'Table.Measure Name'\n"
-        "- List calculated columns\n"
-        "- List relationships\n"
-        "- List relationships for table 'Table Name'\n"
-        "- List pages\n"
-        "- Visuals on page 'Page Name'\n"
-        "- Where is column 'Table.Column' used\n"
-        "- Which visuals use measure 'Measure Name'"
-    )
+    # Fallback
+    return ("Sorry, I didn't understand that. Try asking things like:\n"
+            "- List tables / Describe table 'X'\n"
+            "- List measures / Formula for measure 'Y'\n"
+            "- List calculated columns\n"
+            "- List relationships / List relationships for table 'X'\n"
+            "- List M Queries / M Query for table 'X'\n"
+            "- List pages / Visuals on page 'P'\n"
+            "- Where is column 'T.C' used / Which visuals use measure 'M'")
 
 if __name__ == '__main__':
     dummy_metadata = {
-        "file_name": "test.pbit",
-        "tables": [
-            {"name": "Sales", "columns": [
-                {"name": "OrderID", "dataType": "int64"}, {"name": "Amount", "dataType": "decimal"},
-                {"name": "ProductKey", "dataType": "int64"}, {"name": "CustomerKey", "dataType": "string"}
-            ]},
-            {"name": "Product", "columns": [
-                {"name": "ProductKey", "dataType": "int64"}, {"name": "ProductName", "dataType": "string"},
-                {"name": "Category", "dataType": "string"}
-            ]},
-            {"name": "Customer", "columns": [{"name": "CustomerKey", "dataType": "string"}, {"name": "CustomerName", "dataType": "string"}]},
-            {"name": "CategoryLookup", "columns": [{"name": "CategoryName", "dataType": "string"}, {"name": "CategoryID", "dataType": "int64"}]},
-            {"name": "Global Measures Table", "columns": []} # Table context for some measures
-        ],
-        "measures": {
-            "Sales.Total Sales": "SUM(Sales[Amount])",
-            "Global Sales": "SUM(Sales[Amount])", # A global measure
-            "Product.Avg Price": "AVERAGE(Product[Price])",
-            "Global Measures Table.Count of Categories": "DISTINCTCOUNT(CategoryLookup[CategoryID])"
-        },
-        "calculated_columns": {
-            "Sales.IsHighValue": "IF(Sales[Amount] > 1000, TRUE, FALSE)",
-            "Product.Full Name": "Product[ProductName] & \" (\" & Product[Category] & \")\""
-        },
-        "relationships": [
-            {"fromTable": "Sales", "fromColumn": "ProductKey", "toTable": "Product", "toColumn": "ProductKey", "isActive": True, "crossFilteringBehavior": "Both"},
-            {"fromTable": "Sales", "fromColumn": "CustomerKey", "toTable": "Customer", "toColumn": "CustomerKey", "isActive": True, "crossFilteringBehavior": "SingleDirection"},
-            {"fromTable": "Product", "fromColumn": "Category", "toTable": "CategoryLookup", "toColumn": "CategoryName", "isActive": False, "crossFilteringBehavior": "Both"} 
-        ],
-        "report_pages": [
-            {
-                "name": "Sales Overview",
-                "visuals": [
-                    {"type": "card", "title": "Total Sales Card", "fields_used": ["Sales.Total Sales"]},
-                    {"type": "card", "title": "Global Sales Card", "fields_used": ["Global Sales"]},
-                    {"type": "table", "title": "Sales Details Table", "fields_used": ["Sales.OrderID", "Product.ProductName", "Sales.Amount"]},
-                    {"type": "slicer", "title": "Product Category Slicer", "fields_used": ["Product.Category"]}
-                ]
-            }
-        ]
+        "tables": [{"name": "SalesData"}, {"name": "ProductInfo"}, {"name": "WebSourceTable"}],
+        "m_queries": [
+            {"table_name": "SalesData", "script": "let Src=Excel.Workbook(\"s.xlsx\") in Src", "analysis": {"sources": ["Excel"], "transformations": []}},
+            {"table_name": "ProductInfo", "script": "let Src=Sql.Database(\"srv\",\"db\") in Src", "analysis": {"sources": ["SQL"], "transformations": []}}
+        ], "measures": {"SalesData.TotalAmount": "SUM(SalesData[Amount])"}, "relationships": [],
+        "report_pages": [], "calculated_columns": {}, "file_name": "dummy.pbit"
     }
-
-    queries = [
-        "list tables",
-        "describe table Product",
-        "list measures",
-        "formula for measure Sales.Total Sales",
-        "formula for measure Global Sales",
-        "formula for measure Avg Price", 
-        "formula for measure Count of Categories",
-        "list relationships", 
-        "list relationships for table Sales", 
-        "relationships of Product", 
-        "show relationships for Customer", 
-        "list relationships for table NonExistentTable", 
-        "list relationships for table CategoryLookup",
-        "relationships for", # Test ambiguous relationship query
-        "where is column Product.Category used",
-        "which visuals use Global Sales",
-        "hello there" 
-    ]
-
-    print("--- Chatbot Logic Test ---")
+    queries = ["list m queries", "m query for table SalesData", "power query for WebSourceTable", "list tables"]
+    print("--- Chatbot Logic Test (M Queries Focus) ---")
     for q_idx, q in enumerate(queries):
-        print(f"\n--- Query {q_idx+1} ---")
-        print(f"USER: {q}")
-        response = process_query(q, dummy_metadata)
-        print(f"BOT: {response}")
+        print(f"\n--- Query {q_idx+1} ---\nUSER: {q}\nBOT: {process_query(q, dummy_metadata)}")

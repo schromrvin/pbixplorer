@@ -3,55 +3,42 @@ import json
 import os
 import shutil
 import tempfile
-import codecs # For more control over BOM stripping
+import codecs
+import re # For regular expressions
 from typing import Dict, Any, List, Optional
 
-# --- Constants for file paths within PBIT ---
+# --- Constants ---
 DATAMODEL_SCHEMA_PATH = "DataModelSchema"
 REPORT_LAYOUT_PATH = "Report/Layout"
 
 def strip_all_known_boms(data: bytes) -> (bytes, str):
-    """
-    Strips all common BOMs and returns the data and detected encoding.
-    """
-    # Order matters: more specific (longer) BOMs first
+    """Strips all common BOMs and returns the data and detected encoding."""
     bom_encodings = {
-        codecs.BOM_UTF32_LE: 'utf-32-le',
-        codecs.BOM_UTF32_BE: 'utf-32-be',
-        codecs.BOM_UTF16_LE: 'utf-16-le', # FF FE
-        codecs.BOM_UTF16_BE: 'utf-16-be', # FE FF
-        codecs.BOM_UTF8: 'utf-8-sig'      # EF BB BF
+        codecs.BOM_UTF32_LE: 'utf-32-le', codecs.BOM_UTF32_BE: 'utf-32-be',
+        codecs.BOM_UTF16_LE: 'utf-16-le', codecs.BOM_UTF16_BE: 'utf-16-be',
+        codecs.BOM_UTF8: 'utf-8-sig'
     }
     for bom, encoding in bom_encodings.items():
-        if data.startswith(bom):
-            # print(f"BOM detected: {encoding} for {bom.hex()}")
-            return data[len(bom):], encoding
-    return data, None # No known BOM found
+        if data.startswith(bom): return data[len(bom):], encoding
+    return data, None
 
 def safe_extract_json(zip_file: zipfile.ZipFile, path: str) -> Optional[Dict[str, Any]]:
     """Safely extracts and parses a JSON file from the zip archive."""
     cleaned_content_str = "" 
     detected_encoding_final = "unknown"
     content_bytes_original = b''
-
     try:
         with zip_file.open(path) as f_in:
             content_bytes_original = f_in.read()
-            
             if not content_bytes_original:
                 print(f"Warning: File {path} is empty.")
                 return None
-
             content_bytes_no_bom, bom_detected_encoding = strip_all_known_boms(content_bytes_original)
             
-            # If a BOM was detected, use that encoding primarily
+            # Order based on previous findings (UTF-16 LE was common for the user)
             if bom_detected_encoding:
-                # print(f"Info: Using BOM-detected encoding '{bom_detected_encoding}' for {path}.")
                 potential_encodings = [bom_detected_encoding]
             else:
-                # print(f"Info: No BOM detected for {path}. Will try common encodings.")
-                # If no BOM, UTF-16 LE is a strong candidate based on observed hex.
-                # Also common: UTF-8.
                 potential_encodings = ['utf-16-le', 'utf-8', 'utf-16-be', 'latin-1', 'cp1252']
             
             content_str = None
@@ -59,73 +46,43 @@ def safe_extract_json(zip_file: zipfile.ZipFile, path: str) -> Optional[Dict[str
                 try:
                     content_str = content_bytes_no_bom.decode(enc)
                     detected_encoding_final = enc
-                    # print(f"Successfully decoded {path} with {detected_encoding_final}.")
                     break 
-                except UnicodeDecodeError:
-                    # print(f"Failed to decode {path} with {enc}.")
-                    continue 
+                except UnicodeDecodeError: continue 
             
             if content_str is None:
-                print(f"Warning: Could not decode content from {path} with any attempted encodings.")
-                print(f"         First 20 bytes (hex) of {path}: {content_bytes_original[:20].hex()}")
+                print(f"Warning: Could not decode content from {path}. Hex: {content_bytes_original[:20].hex()}")
                 return None
-            
-            start_json_brace = content_str.find('{')
-            start_json_bracket = content_str.find('[')
-            start_index = -1
 
-            if start_json_brace != -1 and start_json_bracket != -1:
-                start_index = min(start_json_brace, start_json_bracket)
-            elif start_json_brace != -1:
-                start_index = start_json_brace
-            elif start_json_bracket != -1:
-                start_index = start_json_bracket
+            start_json_brace = content_str.find('{'); start_json_bracket = content_str.find('[')
+            start_index = -1
+            if start_json_brace != -1 and start_json_bracket != -1: start_index = min(start_json_brace, start_json_bracket)
+            elif start_json_brace != -1: start_index = start_json_brace
+            elif start_json_bracket != -1: start_index = start_json_bracket
             
             if start_index != -1:
-                if start_index > 0:
-                    # print(f"Info: Stripped leading characters from {path}. Content stripped: {repr(content_str[:start_index])}")
-                    pass # Suppress this message if it's just whitespace from UTF-16 decoding
+                if start_index > 0: 
+                    # print(f"Info: Stripped leading chars from {path}: {repr(content_str[:start_index])}")
+                    pass
                 cleaned_content_str = content_str[start_index:]
             else:
-                print(f"Warning: No JSON starting character ('{{' or '[') found in decoded content of {path}.")
-                # print(f"         Decoded content start (first 100 chars): {repr(content_str[:100])}")
+                # print(f"Warning: No JSON start in {path}. Content: {repr(content_str[:100])}")
                 cleaned_content_str = content_str.strip() 
 
             if not cleaned_content_str:
-                print(f"Warning: Content of {path} is empty after aggressive stripping.")
+                print(f"Warning: Content of {path} empty after strip.")
                 return None
-            
-            # print(f"Cleaned content for {path} starts with: {repr(cleaned_content_str[:20])}")
             return json.loads(cleaned_content_str)
-
-    except KeyError:
-        print(f"Warning: File not found in PBIT: {path}")
-        return None
+    except KeyError: print(f"Warning: File not found in PBIT: {path}"); return None
     except json.JSONDecodeError as e:
         error_char_index = e.pos
         context_str_for_error = cleaned_content_str if cleaned_content_str else (content_bytes_original.decode(detected_encoding_final if detected_encoding_final != 'unknown' else 'utf-8', errors='ignore') if content_bytes_original else "")
-        
-        context_start = max(0, error_char_index - 30)
-        context_end = min(len(context_str_for_error), error_char_index + 30)
+        context_start = max(0, error_char_index - 30); context_end = min(len(context_str_for_error), error_char_index + 30)
         error_context = context_str_for_error[context_start:context_end]
-        
-        print(f"Warning: Could not parse JSON from: {path} (tried encoding: {detected_encoding_final}) - Error: {e}")
-        if error_char_index < len(context_str_for_error):
-            print(f"         Error near character {error_char_index}: '{repr(context_str_for_error[error_char_index])}'")
-        else:
-            print(f"         Error at character {error_char_index} (possibly at end of file or after stripping).")
-        print(f"         Context: ...{repr(error_context)}...")
-        # print(f"         First 20 bytes (hex) of original file {path}: {content_bytes_original[:20].hex()}")
-        return None
-    except Exception as e:
-        import traceback
-        print(f"Warning: An unexpected error occurred while reading/parsing {path}: {e}")
-        traceback.print_exc()
-        return None
-
-# --- PASTE THE REST OF pbit_parser.py FROM THE PREVIOUS FULL SCRIPT HERE ---
-# (normalize_field_reference, extract_fields_from_query_selects, 
-#  extract_fields_from_visual_config, parse_pbit_file, and __main__ block)
+        print(f"Warning: JSON parse error in {path} (enc: {detected_encoding_final}) - {e}")
+        if error_char_index < len(context_str_for_error): print(f" Error near char {error_char_index}: '{repr(context_str_for_error[error_char_index])}'")
+        else: print(f" Error at char {error_char_index}.")
+        print(f" Context: ...{repr(error_context)}..."); return None
+    except Exception as e: import traceback; print(f"Warning: Unexpected error reading {path}: {e}"); traceback.print_exc(); return None
 
 def normalize_field_reference(table: Optional[str], column_or_measure: str) -> str:
     name = str(column_or_measure).replace("'.'", ".").replace("'", "") 
@@ -136,139 +93,144 @@ def normalize_field_reference(table: Optional[str], column_or_measure: str) -> s
 
 def extract_fields_from_query_selects(select_items: List[Dict[str, Any]]) -> List[str]:
     extracted_fields = set()
-    if not isinstance(select_items, list):
-        return []
+    if not isinstance(select_items, list): return []
     for item in select_items:
-        if not isinstance(item, dict):
-            continue
-        field_name = None
-        table_name = None
+        if not isinstance(item, dict): continue
+        field_name = None; table_name = None
         if "Measure" in item and isinstance(item["Measure"], dict):
-            measure_data = item["Measure"]
-            field_name = measure_data.get("Property")
-            if "Expression" in measure_data and isinstance(measure_data["Expression"], dict) and \
-               "SourceRef" in measure_data["Expression"] and isinstance(measure_data["Expression"]["SourceRef"], dict):
-                table_name = measure_data["Expression"]["SourceRef"].get("Entity")
+            m_d = item["Measure"]; field_name = m_d.get("Property")
+            if "Expression" in m_d and isinstance(m_d["Expression"], dict) and "SourceRef" in m_d["Expression"] and isinstance(m_d["Expression"]["SourceRef"], dict): table_name = m_d["Expression"]["SourceRef"].get("Entity")
         elif "Column" in item and isinstance(item["Column"], dict):
-            col_data = item["Column"]
-            field_name = col_data.get("Property")
-            if "Expression" in col_data and isinstance(col_data["Expression"], dict) and \
-               "SourceRef" in col_data["Expression"] and isinstance(col_data["Expression"]["SourceRef"], dict):
-                table_name = col_data["Expression"]["SourceRef"].get("Entity")
+            c_d = item["Column"]; field_name = c_d.get("Property")
+            if "Expression" in c_d and isinstance(c_d["Expression"], dict) and "SourceRef" in c_d["Expression"] and isinstance(c_d["Expression"]["SourceRef"], dict): table_name = c_d["Expression"]["SourceRef"].get("Entity")
         elif "Aggregation" in item and isinstance(item["Aggregation"], dict):
-            agg_data = item["Aggregation"]
-            if "Expression" in agg_data and isinstance(agg_data["Expression"], dict) and \
-               "Column" in agg_data["Expression"] and isinstance(agg_data["Expression"]["Column"], dict):
-                col_data = agg_data["Expression"]["Column"]
-                field_name = col_data.get("Property")
-                if "Expression" in col_data and isinstance(col_data["Expression"], dict) and \
-                   "SourceRef" in col_data["Expression"] and isinstance(col_data["Expression"]["SourceRef"], dict):
-                    table_name = col_data["Expression"]["SourceRef"].get("Entity")
+            a_d = item["Aggregation"]
+            if "Expression" in a_d and isinstance(a_d["Expression"], dict) and "Column" in a_d["Expression"] and isinstance(a_d["Expression"]["Column"], dict):
+                c_d = a_d["Expression"]["Column"]; field_name = c_d.get("Property")
+                if "Expression" in c_d and isinstance(c_d["Expression"], dict) and "SourceRef" in c_d["Expression"] and isinstance(c_d["Expression"]["SourceRef"], dict): table_name = c_d["Expression"]["SourceRef"].get("Entity")
         elif "HierarchyLevel" in item and isinstance(item["HierarchyLevel"], dict):
-            hl_data = item["HierarchyLevel"]
-            level_expr = hl_data.get("Expression", {}).get("Level", {})
-            if isinstance(level_expr, dict) and "Expression" in level_expr and \
-               isinstance(level_expr["Expression"], dict) and "SourceRef" in level_expr["Expression"] and \
-               isinstance(level_expr["Expression"]["SourceRef"], dict):
-                 table_name = level_expr["Expression"]["SourceRef"].get("Entity")
-                 field_name = level_expr.get("Level") 
-            elif "Name" in hl_data: 
-                 field_name = hl_data.get("Name")
-        if field_name:
-            extracted_fields.add(normalize_field_reference(table_name, str(field_name)))
+            hl_d = item["HierarchyLevel"]; l_e = hl_d.get("Expression", {}).get("Level", {})
+            if isinstance(l_e, dict) and "Expression" in l_e and isinstance(l_e["Expression"], dict) and "SourceRef" in l_e["Expression"] and isinstance(l_e["Expression"]["SourceRef"], dict):
+                table_name = l_e["Expression"]["SourceRef"].get("Entity"); field_name = l_e.get("Level")
+            elif "Name" in hl_d: field_name = hl_d.get("Name")
+        if field_name: extracted_fields.add(normalize_field_reference(table_name, str(field_name)))
     return list(extracted_fields)
 
 def extract_fields_from_visual_config(visual_config: Dict[str, Any], visual_level_filters_str: Optional[str]) -> List[str]:
-    fields = set()
-    if not isinstance(visual_config, dict): 
-        return []
+    fields = set(); 
+    if not isinstance(visual_config, dict): return []
     if "projections" in visual_config and isinstance(visual_config["projections"], dict):
-        for _, proj_list in visual_config["projections"].items():
-            if isinstance(proj_list, list):
-                for proj_item in proj_list:
-                    if isinstance(proj_item, dict) and "queryRef" in proj_item:
-                        query_ref = proj_item.get("queryRef")
-                        if isinstance(query_ref, str):
-                            fields.add(normalize_field_reference(None, query_ref))
-    single_visual_conf = visual_config.get("singleVisual", {})
-    if isinstance(single_visual_conf, dict):
-        prototype_query = single_visual_conf.get("prototypeQuery", {})
-        if isinstance(prototype_query, dict) and "Select" in prototype_query:
-            fields.update(extract_fields_from_query_selects(prototype_query["Select"]))
-        query_section = single_visual_conf.get("query", {})
-        if isinstance(query_section, dict) and "selects" in query_section:
-            fields.update(extract_fields_from_query_selects(query_section["selects"]))
-        slicer_data_objects = single_visual_conf.get("objects", {}).get("data") 
-        if not slicer_data_objects: 
-            general_obj = single_visual_conf.get("vcObjects", {}).get("general")
-            if isinstance(general_obj, list) and general_obj: 
-                 slicer_data_objects = general_obj[0].get("properties",{}).get("filterDataSource",{}).get("target")
-            elif isinstance(general_obj, dict): 
-                 slicer_data_objects = general_obj.get("properties",{}).get("filterDataSource",{}).get("target")
-        slicer_target_props = {} 
-        if isinstance(slicer_data_objects, list) and slicer_data_objects: 
-            slicer_target_props_container = slicer_data_objects[0].get("properties", {}).get("target", {})
-            if isinstance(slicer_target_props_container, dict) and "target" in slicer_target_props_container:
-                 slicer_target_props = slicer_target_props_container.get("target",{})
-            else: 
-                 slicer_target_props = slicer_target_props_container
-        elif isinstance(slicer_data_objects, dict): 
-            slicer_target_props = slicer_data_objects
-        if isinstance(slicer_target_props, dict): 
-            table = slicer_target_props.get("table")
-            column = slicer_target_props.get("column")
-            measure = slicer_target_props.get("measure")
-            hierarchy = slicer_target_props.get("hierarchy")
-            level = slicer_target_props.get("level") 
-            if table and column: fields.add(normalize_field_reference(table, column))
-            elif table and hierarchy and level: fields.add(normalize_field_reference(table, level))
-            elif table and measure: fields.add(normalize_field_reference(table, measure))
-            elif measure: fields.add(normalize_field_reference(None, measure)) 
-    data_transforms = visual_config.get("dataTransforms", {})
-    if isinstance(data_transforms, dict) and "selects" in data_transforms:
-        for item in data_transforms.get("selects", []):
+        for _, p_l in visual_config["projections"].items():
+            if isinstance(p_l, list):
+                for p_i in p_l:
+                    if isinstance(p_i, dict) and "queryRef" in p_i:
+                        q_r = p_i.get("queryRef"); 
+                        if isinstance(q_r, str): fields.add(normalize_field_reference(None, q_r))
+    s_v_c = visual_config.get("singleVisual", {})
+    if isinstance(s_v_c, dict):
+        p_q = s_v_c.get("prototypeQuery", {}); 
+        if isinstance(p_q, dict) and "Select" in p_q: fields.update(extract_fields_from_query_selects(p_q["Select"]))
+        q_s = s_v_c.get("query", {}); 
+        if isinstance(q_s, dict) and "selects" in q_s: fields.update(extract_fields_from_query_selects(q_s["selects"]))
+        s_d_o = s_v_c.get("objects", {}).get("data")
+        if not s_d_o:
+            g_o = s_v_c.get("vcObjects", {}).get("general")
+            if isinstance(g_o, list) and g_o: s_d_o = g_o[0].get("properties",{}).get("filterDataSource",{}).get("target")
+            elif isinstance(g_o, dict): s_d_o = g_o.get("properties",{}).get("filterDataSource",{}).get("target")
+        s_t_p = {}; 
+        if isinstance(s_d_o, list) and s_d_o:
+            s_t_p_c = s_d_o[0].get("properties", {}).get("target", {})
+            s_t_p = s_t_p_c.get("target",{}) if isinstance(s_t_p_c, dict) and "target" in s_t_p_c else s_t_p_c
+        elif isinstance(s_d_o, dict): s_t_p = s_d_o
+        if isinstance(s_t_p, dict):
+            t = s_t_p.get("table"); c = s_t_p.get("column"); m = s_t_p.get("measure"); h = s_t_p.get("hierarchy"); l = s_t_p.get("level")
+            if t and c: fields.add(normalize_field_reference(t,c))
+            elif t and h and l: fields.add(normalize_field_reference(t,l))
+            elif t and m: fields.add(normalize_field_reference(t,m))
+            elif m: fields.add(normalize_field_reference(None,m))
+    d_t = visual_config.get("dataTransforms", {})
+    if isinstance(d_t, dict) and "selects" in d_t:
+        for item in d_t.get("selects", []):
             if isinstance(item, dict):
-                query_name = item.get("queryName")
-                if query_name and isinstance(query_name, str) and ('.' in query_name or not any(c in query_name for c in '()[]{}')):
-                    fields.add(normalize_field_reference(None, query_name))
+                q_n = item.get("queryName")
+                if q_n and isinstance(q_n, str) and ('.' in q_n or not any(c in q_n for c in '()[]{}')): fields.add(normalize_field_reference(None, q_n))
                 else:
-                    expr = item.get("expr")
-                    if isinstance(expr, dict):
-                        fields.update(extract_fields_from_query_selects([expr])) 
-                    elif item.get("displayName") and isinstance(item.get("displayName"), str):
-                         fields.add(normalize_field_reference(None, item.get("displayName")))
+                    ex = item.get("expr"); 
+                    if isinstance(ex, dict): fields.update(extract_fields_from_query_selects([ex]))
+                    elif item.get("displayName") and isinstance(item.get("displayName"), str): fields.add(normalize_field_reference(None, item.get("displayName")))
     if visual_level_filters_str:
         try:
-            filters_list = json.loads(visual_level_filters_str)
-            if isinstance(filters_list, list):
-                for filter_item in filters_list:
-                    if isinstance(filter_item, dict):
-                        target = filter_item.get("target")
-                        if isinstance(target, list) and target: 
-                             for t_item in target:
-                                if isinstance(t_item, dict):
-                                    table = t_item.get("table")
-                                    column = t_item.get("column")
-                                    measure = t_item.get("measure")
-                                    hierarchy = t_item.get("hierarchy")
-                                    level = t_item.get("level")
-                                    if table and column: fields.add(normalize_field_reference(table, column))
-                                    elif table and hierarchy and level: fields.add(normalize_field_reference(table, level))
-                                    elif table and measure: fields.add(normalize_field_reference(table, measure))
-                                    elif measure: fields.add(normalize_field_reference(None, measure))
-                        expression = filter_item.get("expression")
-                        if isinstance(expression, dict):
-                             fields.update(extract_fields_from_query_selects([expression])) 
-        except json.JSONDecodeError:
-            print(f"Warning: Visual filters JSON decode error. String start: {visual_level_filters_str[:100]}...")
-        except Exception as e:
-            print(f"Warning: Error processing visual filters: {e}")
+            f_l = json.loads(visual_level_filters_str)
+            if isinstance(f_l, list):
+                for f_i in f_l:
+                    if isinstance(f_i, dict):
+                        tgt = f_i.get("target"); 
+                        if isinstance(tgt, list) and tgt:
+                            for t_i in tgt:
+                                if isinstance(t_i, dict):
+                                    t=t_i.get("table");c=t_i.get("column");m=t_i.get("measure");h=t_i.get("hierarchy");l=t_i.get("level")
+                                    if t and c: fields.add(normalize_field_reference(t,c))
+                                    elif t and h and l: fields.add(normalize_field_reference(t,l))
+                                    elif t and m: fields.add(normalize_field_reference(t,m))
+                                    elif m: fields.add(normalize_field_reference(None,m))
+                        exp = f_i.get("expression"); 
+                        if isinstance(exp, dict): fields.update(extract_fields_from_query_selects([exp]))
+        except json.JSONDecodeError: print(f"W: VFilter JSON decode err. Str: {visual_level_filters_str[:100]}...")
+        except Exception as e: print(f"W: Err processing VFilters: {e}")
     return list(f for f in fields if f)
+
+def analyze_m_query(m_script: str) -> Dict[str, List[str]]:
+    analysis = {"sources": [], "transformations": [], "parameters": []}
+    if not m_script: return analysis
+    source_patterns = {
+        "Excel": r"\bExcel\.(Workbook|Files)\b", "CSV": r"\bCsv\.Document\b",
+        "SQL": r"\bSql\.(Database|Databases)\b", "Web": r"\bWeb\.Contents\b",
+        "OData": r"\bOData\.Feed\b", "JSON": r"\bJson\.Document\b",
+        "XML": r"\bXml\.(Document|Tables)\b", "Folder": r"\bFolder\.Files\b",
+        "SharePoint": r"\bSharePoint\.(Files|Tables|Lists)\b",
+        "AnalysisServices": r"\bAnalysisServices\.(Databases|Database)\b",
+        "DirectInput": r"#\"?\w[\w\s\.]*\"?\(",
+        "TableFromRows": r"\bTable\.FromRows\b", "TableFromRecords": r"\bTable\.FromRecords\b",
+        "TableFromColumns": r"\bTable\.FromColumns\b",
+        "EnterData": r"Table\.FromRows\(Json\.Document\(Binary\.Decompress\(Binary\.FromText\("
+    }
+    transformation_patterns = {
+        "SelectRows": r"\bTable\.SelectRows\b", "RemoveColumns": r"\bTable\.RemoveColumns\b",
+        "AddColumn": r"\bTable\.AddColumn\b", "TransformColumns": r"\bTable\.TransformColumns\b",
+        "TransformColumnTypes": r"\bTable\.TransformColumnTypes\b", "Group": r"\bTable\.Group\b",
+        "Merge": r"\bTable\.NestedJoin\b|\bTable\.Join\b|\bTable\.FuzzyJoin\b",
+        "Append": r"\bTable\.Combine\b", "PromoteHeaders": r"\bTable\.PromoteHeaders\b",
+        "DemoteHeaders": r"\bTable\.DemoteHeaders\b", "Pivot": r"\bTable\.Pivot\b",
+        "Unpivot": r"\bTable\.Unpivot\b|\bTable\.UnpivotOtherColumns\b", "Sort": r"\bTable\.Sort\b",
+        "Filter": r"\bTable\.SelectRows\b", "ReplaceValue": r"\bTable\.ReplaceValue\b",
+        "SplitColumn": r"\bTable\.SplitColumn\b|\bSplitter\.\w+\b",
+        "FillDownUp": r"\bTable\.FillDown\b|\bTable\.FillUp\b",
+        "KeepRemoveRows": r"\bTable\.FirstN\b|\bTable\.LastN\b|\bTable\.RemoveFirstN\b|\bTable\.RemoveLastN\b|\bTable\.Range\b|\bTable\.RemoveAlternateRows\b|\bTable\.AlternateRows\b|\bTable\.Distinct\b|\bTable\.RemoveDuplicates\b|\bTable\.KeepDuplicates\b",
+        "ChangeType": r"\bTable\.TransformColumnTypes\b", 
+        "InvokeCustomFunction": r"\bFunction\.Invoke\b|\b@?\w+\("
+    }
+    m_script_no_comments = re.sub(r"//.*", "", m_script)
+    m_script_no_comments = re.sub(r"/\*.*?\*/", "", m_script_no_comments, flags=re.DOTALL)
+    for source_name, pattern in source_patterns.items():
+        if re.search(pattern, m_script_no_comments, re.IGNORECASE):
+            if source_name == "DirectInput":
+                matches = re.findall(r"#\"?([\w\s\.]+)\"?\(", m_script_no_comments, re.IGNORECASE)
+                for m in matches:
+                    if not any(m.startswith(lib_prefix) for lib_prefix in ["Table.", "List.", "Record.", "Text.", "Expression."]):
+                         analysis["sources"].append(f"Reference: {m.strip()}")
+            else: analysis["sources"].append(source_name)
+    for transform_name, pattern in transformation_patterns.items():
+        if re.search(pattern, m_script_no_comments, re.IGNORECASE):
+            analysis["transformations"].append(transform_name)
+    analysis["sources"] = sorted(list(set(analysis["sources"])))
+    analysis["transformations"] = sorted(list(set(analysis["transformations"])))
+    return analysis
 
 def parse_pbit_file(pbit_file_path: str) -> Optional[Dict[str, Any]]:
     extracted_metadata = {
         "tables": [], "relationships": [], "measures": {},
         "calculated_columns": {}, "report_pages": [],
+        "m_queries": [], 
         "file_name": os.path.basename(pbit_file_path)
     }
     try:
@@ -284,13 +246,26 @@ def parse_pbit_file(pbit_file_path: str) -> Optional[Dict[str, Any]]:
                         if "columns" in table_data and isinstance(table_data["columns"], list):
                             for col_data in table_data["columns"]:
                                 if not isinstance(col_data, dict): continue
-                                col_name = col_data.get("name")
-                                col_type = col_data.get("dataType")
+                                col_name = col_data.get("name"); col_type = col_data.get("dataType")
                                 columns.append({"name": col_name, "dataType": col_type})
                                 if col_data.get("type") == "calculated" and "expression" in col_data:
                                     cc_key = normalize_field_reference(table_name, col_name)
                                     extracted_metadata["calculated_columns"][cc_key] = col_data["expression"]
                         extracted_metadata["tables"].append({"name": table_name, "columns": columns})
+                        if "partitions" in table_data and isinstance(table_data["partitions"], list):
+                            for partition in table_data["partitions"]:
+                                if not isinstance(partition, dict): continue
+                                source = partition.get("source")
+                                if isinstance(source, dict) and source.get("type") == "m":
+                                    m_expr_list = source.get("expression"); m_script = ""
+                                    if isinstance(m_expr_list, list): m_script = "\n".join(m_expr_list)
+                                    elif isinstance(m_expr_list, str): m_script = m_expr_list
+                                    if table_name and m_script:
+                                        m_analysis = analyze_m_query(m_script)
+                                        extracted_metadata["m_queries"].append({
+                                            "table_name": table_name, "script": m_script, "analysis": m_analysis
+                                        })
+                                        break 
                 if "tables" in model and isinstance(model["tables"], list): 
                     for table_data in model["tables"]:
                         if not isinstance(table_data, dict): continue
@@ -298,8 +273,7 @@ def parse_pbit_file(pbit_file_path: str) -> Optional[Dict[str, Any]]:
                         if "measures" in table_data and isinstance(table_data["measures"], list):
                             for measure_data in table_data["measures"]:
                                 if not isinstance(measure_data, dict): continue
-                                measure_name = measure_data.get("name")
-                                measure_expression = measure_data.get("expression")
+                                measure_name = measure_data.get("name"); measure_expression = measure_data.get("expression")
                                 if table_name and measure_name and measure_expression:
                                     measure_key = normalize_field_reference(table_name, measure_name)
                                     extracted_metadata["measures"][measure_key] = measure_expression
@@ -312,131 +286,81 @@ def parse_pbit_file(pbit_file_path: str) -> Optional[Dict[str, Any]]:
                             "isActive": rel_data.get("isActive", True),
                             "crossFilteringBehavior": rel_data.get("crossFilteringBehavior")
                         })
-            else:
-                print(f"Warning: DataModelSchema content issue or 'model' key missing in {DATAMODEL_SCHEMA_PATH} after parsing attempts.")
+            else: print(f"W: DataModelSchema issue or 'model' key missing in {DATAMODEL_SCHEMA_PATH}.")
             report_layout_json = safe_extract_json(pbit_zip, REPORT_LAYOUT_PATH)
             if report_layout_json and "sections" in report_layout_json and isinstance(report_layout_json["sections"], list): 
                 for section in report_layout_json["sections"]:
                     if not isinstance(section, dict): continue
-                    page_name = section.get("displayName")
-                    visuals_on_page = []
+                    page_name = section.get("displayName"); visuals_on_page = []
                     if "visualContainers" in section and isinstance(section["visualContainers"], list):
                         for vc_idx, vc in enumerate(section["visualContainers"]):
                             if not isinstance(vc, dict): continue
                             try:
-                                config_str = vc.get("config", "{}")
-                                config = {} 
+                                config_str = vc.get("config", "{}"); config = {} 
                                 if isinstance(config_str, str) and config_str.strip():
-                                    try:
-                                        config = json.loads(config_str) 
-                                    except json.JSONDecodeError as e_json_config:
-                                        print(f"Warning: Inner visual config JSON decode error for page '{page_name}', visual index {vc_idx}: {e_json_config}. Config string (start): {config_str[:200]}")
-                                        continue 
+                                    try: config = json.loads(config_str) 
+                                    except json.JSONDecodeError as e_json_config: print(f"W: Inner visual JSON err p'{page_name}',v{vc_idx}:{e_json_config}. Str:{config_str[:100]}"); continue 
                                 visual_type = None
                                 if isinstance(config, dict): 
-                                    visual_type = config.get("visualType") or \
-                                                (config.get("singleVisual", {}).get("visualType") if isinstance(config.get("singleVisual"), dict) else None)
-                                if not visual_type:
-                                    visual_type = vc.get("name") 
+                                    visual_type = config.get("visualType") or (config.get("singleVisual", {}).get("visualType") if isinstance(config.get("singleVisual"), dict) else None)
+                                if not visual_type: visual_type = vc.get("name") 
                                 visual_title = None
-                                if isinstance(config, dict) and isinstance(config.get("singleVisual"), dict) and \
-                                   isinstance(config["singleVisual"].get("vcObjects"), dict) and \
-                                   isinstance(config["singleVisual"]["vcObjects"].get("title"), list) and \
-                                   config["singleVisual"]["vcObjects"]["title"]:
-                                    title_obj_list = config["singleVisual"]["vcObjects"]["title"]
-                                    if title_obj_list and isinstance(title_obj_list[0], dict):
-                                        title_props = title_obj_list[0].get("properties", {}).get("text", {})
-                                        if isinstance(title_props, dict) and "expr" in title_props and \
-                                           isinstance(title_props["expr"], dict) and "Literal" in title_props["expr"] and \
-                                           isinstance(title_props["expr"]["Literal"], dict) and "Value" in title_props["expr"]["Literal"]:
-                                            literal_val = title_props["expr"]["Literal"].get("Value")
-                                            if isinstance(literal_val, str):
-                                                visual_title = literal_val.strip("'")
-                                visual_filters_str = vc.get("filters")
-                                fields_used = extract_fields_from_visual_config(config, visual_filters_str)
-                                visuals_on_page.append({
-                                    "type": visual_type, "title": visual_title,
-                                    "fields_used": list(set(fields_used)) 
-                                })
-                            except Exception as e_vc: 
-                                print(f"Warning: Could not parse visual container on page '{page_name}', visual index {vc_idx}: {e_vc}")
-                    extracted_metadata["report_pages"].append({
-                        "name": page_name, "visuals": visuals_on_page
-                    })
-            else:
-                print(f"Warning: Report/Layout content issue or 'sections' key missing in {REPORT_LAYOUT_PATH} after parsing attempts.")
+                                if isinstance(config, dict) and isinstance(config.get("singleVisual"), dict) and isinstance(config["singleVisual"].get("vcObjects"), dict) and isinstance(config["singleVisual"]["vcObjects"].get("title"), list) and config["singleVisual"]["vcObjects"]["title"]:
+                                    t_o_l = config["singleVisual"]["vcObjects"]["title"]
+                                    if t_o_l and isinstance(t_o_l[0], dict):
+                                        t_p = t_o_l[0].get("properties", {}).get("text", {})
+                                        if isinstance(t_p, dict) and "expr" in t_p and isinstance(t_p["expr"], dict) and "Literal" in t_p["expr"] and isinstance(t_p["expr"]["Literal"], dict) and "Value" in t_p["expr"]["Literal"]:
+                                            l_v = t_p["expr"]["Literal"].get("Value")
+                                            if isinstance(l_v, str): visual_title = l_v.strip("'")
+                                v_f_s = vc.get("filters"); f_u = extract_fields_from_visual_config(config, v_f_s)
+                                visuals_on_page.append({"type": visual_type, "title": visual_title, "fields_used": list(set(f_u)) })
+                            except Exception as e_vc: print(f"W: Could not parse visual p'{page_name}',v{vc_idx}: {e_vc}")
+                    extracted_metadata["report_pages"].append({"name": page_name, "visuals": visuals_on_page})
+            else: print(f"W: Report/Layout issue or 'sections' key missing in {REPORT_LAYOUT_PATH}.")
         return extracted_metadata
-    except FileNotFoundError:
-        print(f"Error: PBIT file not found at {pbit_file_path}")
-    except zipfile.BadZipFile:
-        print(f"Error: Bad PBIT file (not a valid zip archive): {pbit_file_path}")
-    except Exception as e:
-        import traceback
-        print(f"An unexpected error occurred during PBIT parsing: {e}")
-        traceback.print_exc()
+    except FileNotFoundError: print(f"E: PBIT file not found: {pbit_file_path}");
+    except zipfile.BadZipFile: print(f"E: Bad PBIT file (not zip): {pbit_file_path}");
+    except Exception as e: import traceback; print(f"E during PBIT parsing: {e}"); traceback.print_exc();
     return None
 
 if __name__ == '__main__':
-    dummy_pbit_path = "dummy_test_visuals_utf16le_no_bom.pbit" # New name for this test
-    
+    dummy_pbit_path = "dummy_m_query_test.pbit"
     if not os.path.exists(dummy_pbit_path):
-        print(f"Creating dummy PBIT: {dummy_pbit_path} for testing UTF-16 LE without BOM...")
-        temp_dir_for_dummy = "dummy_pbit_contents_utf16le"
-        os.makedirs(temp_dir_for_dummy, exist_ok=True)
-        report_dir = os.path.join(temp_dir_for_dummy, "Report") 
-        os.makedirs(report_dir, exist_ok=True)
-
-        # DataModelSchema: UTF-16 LE without BOM
-        dummy_datamodel_content_dict = {
-            "name": "dummy-model-utf16le", "compatibilityLevel": 1550,
-            "model": {"culture": "en-US", "tables": [
-                {"name": "Sales", "columns": [{"name": "Amount", "dataType": "decimal"}],
-                 "measures": [{"name": "Total Sales", "expression": "SUM(Sales[Amount])"}]},
-                {"name": "Product", "columns": [{"name": "Category", "dataType": "string"}]}
-            ]}
-        }
-        datamodel_json_str = json.dumps(dummy_datamodel_content_dict)
-        with open(os.path.join(temp_dir_for_dummy, DATAMODEL_SCHEMA_PATH), 'wb') as f: 
-            f.write(datamodel_json_str.encode('utf-16-le')) # Encode as UTF-16 LE, no explicit BOM written by encode()
-
-        # Report/Layout: UTF-16 LE without BOM
-        dummy_report_layout_content = {
-            "sections": [{
-                "displayName": "Overview_UTF16",
-                "visualContainers": [{
-                    "config": json.dumps({ 
-                        "visualType": "card", "singleVisual": {"prototypeQuery": {"Select": [
-                            {"Measure": {"Expression": {"SourceRef": {"Entity": "Sales"}}, "Property": "Total Sales"}}
-                        ]}}
-                    }), "filters": "[]" 
-                },{
-                    "config": json.dumps({
-                        "visualType": "slicer", "singleVisual": {"objects": {"data": [{"properties": {"target": {"target": {"table": "Product", "column": "Category"}}}}]}}
-                    }), "filters": "[]"
-                }]
-            }]
-        }
-        report_layout_json_str = json.dumps(dummy_report_layout_content)
-        with open(os.path.join(report_dir, "Layout"), 'wb') as f: 
-             f.write(report_layout_json_str.encode('utf-16-le'))
-        
-        archive_name = dummy_pbit_path.replace(".pbit", "")
-        shutil.make_archive(archive_name, 'zip', root_dir=temp_dir_for_dummy, base_dir='.')
-        if os.path.exists(dummy_pbit_path): os.remove(dummy_pbit_path)
-        os.rename(archive_name + ".zip", dummy_pbit_path)
-        print(f"Created dummy PBIT: {dummy_pbit_path}")
-        if os.path.exists(temp_dir_for_dummy): shutil.rmtree(temp_dir_for_dummy)
-    
-    print(f"\nParsing {dummy_pbit_path}...")
-    metadata = parse_pbit_file(dummy_pbit_path) 
+        print(f"Creating dummy PBIT: {dummy_pbit_path} for M query testing...")
+        temp_dir = "dummy_m_query_contents"; os.makedirs(temp_dir, exist_ok=True)
+        report_dir = os.path.join(temp_dir, "Report"); os.makedirs(report_dir, exist_ok=True)
+        model_content = {
+            "name": "m-query-model", "model": {"tables": [
+                {"name": "SalesFromExcel", "columns": [{"name": "Amount", "dataType": "decimal"}],
+                 "partitions": [{"name": "p1", "mode": "import", "source": {"type": "m", "expression": [
+                     "let", "    Source = Excel.Workbook(File.Contents(\"C:\\\\data\\\\sales.xlsx\")),",
+                     "    Sales_Sheet = Source{[Item=\"Sales\",Kind=\"Sheet\"]}[Data],",
+                     "    #\"Promoted Headers\" = Table.PromoteHeaders(Sales_Sheet), // A comment",
+                     "    #\"Changed Type\" = Table.TransformColumnTypes(#\"Promoted Headers\",{{\"Amount\", type number}})",
+                     "in", "    #\"Changed Type\""
+                 ]}}]},
+                {"name": "ProductsFromWeb", "columns": [{"name": "ProductName", "dataType": "string"}],
+                 "partitions": [{"name": "p2", "mode": "import", "source": {"type": "m", "expression": [
+                     "let", "    Source = Json.Document(Web.Contents(\"https://api.example.com/products\")),",
+                     "    #\"ToTable\" = Table.FromList(Source, Splitter.SplitByNothing()),",
+                     "    /* Multi-line\n       comment here */",
+                     "    #\"Expanded\" = Table.ExpandRecordColumn(#\"ToTable\", \"Column1\", {\"ProductName\"})",
+                     "in", "    #\"Expanded\""
+                 ]}}]},
+                {"name": "RefTable", "columns": [{"name":"ID"}], "partitions": [{"name":"p_ref", "mode":"import", "source":{"type":"m", "expression": "let\n Source = SalesFromExcel,\n // Filter out old sales\n Filtered = Table.SelectRows(Source, each [OrderDate] > #date(2022,1,1))\nin Filtered"}}]}
+            ]}}
+        with open(os.path.join(temp_dir, DATAMODEL_SCHEMA_PATH), 'w', encoding='utf-16-le') as f: json.dump(model_content, f) # Test UTF-16LE no BOM
+        report_content = {"sections": [{"displayName": "Page1", "visualContainers": []}]}
+        with open(os.path.join(report_dir, "Layout"), 'w', encoding='utf-16-le') as f: json.dump(report_content, f)
+        shutil.make_archive(dummy_pbit_path.replace(".pbit", ""), 'zip', root_dir=temp_dir, base_dir='.')
+        os.rename(dummy_pbit_path.replace(".pbit", ".zip"), dummy_pbit_path)
+        print(f"Created {dummy_pbit_path}"); shutil.rmtree(temp_dir)
+    metadata = parse_pbit_file(dummy_pbit_path)
     if metadata:
-        print("\n--- Extracted Metadata (UTF-16 LE Test) ---")
-        print(f"File: {metadata.get('file_name')}")
-        print(f"Tables: {[t.get('name') for t in metadata.get('tables', [])]}")
-        print(f"Measures: {list(metadata.get('measures', {}).keys())}")
-        for page in metadata.get("report_pages", []):
-            print(f"\nPage: {page['name']}")
-            for visual in page.get("visuals", []):
-                print(f"  - Visual Type: {visual['type']}, Title: {visual.get('title', 'N/A')}, Fields: {visual['fields_used']}")
-    else:
-        print("Metadata parsing failed or returned None.")
+        print("\n--- M Query Analysis ---")
+        if metadata.get("m_queries"):
+            for mq in metadata["m_queries"]:
+                print(f"\nTable: {mq['table_name']}")
+                print(f"  Sources: {mq['analysis']['sources']}")
+                print(f"  Transformations: {mq['analysis']['transformations']}")
+        else: print("No M Queries found.")  
