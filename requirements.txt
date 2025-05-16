@@ -1,0 +1,3 @@
+streamlit>=1.10.0,<2.0.0
+# We don't need much else for this basic version without spaCy
+# If you find you need other small utility libraries, add them here.
