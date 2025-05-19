@@ -20,59 +20,98 @@ if "explorer_search_term" not in st.session_state:
 # Initialize explorer_option correctly
 if "explorer_option" not in st.session_state: 
     st.session_state.explorer_option = "Select an option..."
+if "run_id" not in st.session_state: # To help trigger JS execution for scrolling
+    st.session_state.run_id = 0
 
 
-# --- Helper function for filtering ---
+# --- Helper function for filtering dictionary items (for explorer) ---
 def filter_dict_items(items_dict, search_term):
-    if not search_term:
+    if not search_term: # If search term is empty, return all items
         return items_dict
     search_term_lower = search_term.lower()
-    return {k: v for k, v in items_dict.items() if search_term_lower in str(k).lower() or search_term_lower in str(v).lower()}
+    return {
+        k: v for k, v in items_dict.items() 
+        if search_term_lower in str(k).lower() or 
+           (isinstance(v, str) and search_term_lower in v.lower()) # Check if v is string for direct search
+           # Add more sophisticated searching within 'v' if v can be other types (e.g., lists, dicts)
+    }
 
 # --- Sidebar UI ---
-st.sidebar.title("PBIT Tools 🛠️")
+st.sidebar.title("📊 PBIT Chatbot")
 st.sidebar.markdown("---")
 
 # --- File Upload in Sidebar ---
-uploaded_file = st.sidebar.file_uploader("Choose a .pbit file", type=["pbit"], key="pbit_uploader")
+# Use a callback to reset dependent states when a new file is uploaded
+def on_file_upload_change():
+    # This function is called when the file uploader's value changes.
+    # If a new file is uploaded, uploaded_file will not be None.
+    # If the file is removed, uploaded_file will be None.
+    # We only want to reset things if a *new* file is effectively being processed.
+    # The main logic block for uploaded_file handles the actual processing.
+    # Here, we primarily ensure that if the uploader is cleared, we reset relevant states.
+    if st.session_state.pbit_uploader is None and st.session_state.pbit_metadata is not None:
+        st.session_state.pbit_metadata = None
+        st.session_state.uploaded_file_name = None
+        st.session_state.chat_history = []
+        st.session_state.explorer_option = "Select an option..."
+        st.session_state.explorer_search_term = ""
+        # No st.rerun() here, let the main flow handle it or Streamlit's natural rerun.
+
+uploaded_file = st.sidebar.file_uploader(
+    "Choose a .pbit file", 
+    type=["pbit"], 
+    key="pbit_uploader",
+    on_change=on_file_upload_change # Callback when file is uploaded or removed
+)
 
 if uploaded_file is not None:
+    # Process if it's a new file name or if metadata hasn't been loaded for the current file
     if st.session_state.uploaded_file_name != uploaded_file.name or st.session_state.pbit_metadata is None:
         st.session_state.chat_history = [] 
         st.session_state.uploaded_file_name = uploaded_file.name
-        st.session_state.pbit_metadata = None 
+        st.session_state.pbit_metadata = None # Reset metadata explicitly before parsing new file
         
         with st.spinner(f"Processing '{uploaded_file.name}'..."):
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pbit") as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
                 temp_file_path = tmp_file.name
+            
             try:
                 metadata = parse_pbit_file(temp_file_path)
-                st.session_state.pbit_metadata = metadata
+                st.session_state.pbit_metadata = metadata # Store parsed metadata
                 if metadata:
                     st.sidebar.success(f"Parsed '{uploaded_file.name}'!")
                     st.session_state.chat_history = [
-                        {"role": "assistant", "content": f"Analyzed '{metadata.get('file_name', 'your file')}'. How can I help?"}
+                        {"role": "assistant", "content": f"Analyzed '{metadata.get('file_name', 'your file')}'. How can I help you today?"}
                     ]
-                    # Reset explorer options on new file, ensuring it's a valid default
                     st.session_state.explorer_option = "Select an option..." 
                     st.session_state.explorer_search_term = ""
+                    st.session_state.run_id += 1 
                 else:
-                    st.sidebar.error("Could not parse PBIT.")
-                    st.session_state.pbit_metadata = None
+                    st.sidebar.error("Could not parse the PBIT file. Check console for parser warnings.")
+                    st.session_state.pbit_metadata = None 
             except Exception as e:
-                st.sidebar.error(f"Processing error: {e}")
+                st.sidebar.error(f"An error occurred during PBIT processing: {e}")
                 st.session_state.pbit_metadata = None
             finally:
-                if os.path.exists(temp_file_path): os.remove(temp_file_path)
-                st.rerun() 
-else:
-    if not st.session_state.pbit_metadata and st.session_state.uploaded_file_name is None :
-        pass 
+                if os.path.exists(temp_file_path):
+                    os.remove(temp_file_path) 
+                st.rerun() # Rerun to reflect the new state (metadata loaded or error shown)
+# This else handles the case where a file was previously loaded but then removed by the user
+elif st.session_state.uploaded_file_name is not None and uploaded_file is None:
+    # This means the file uploader was cleared by the user
+    if st.session_state.pbit_metadata is not None: # If there was metadata, clear it
+        st.session_state.pbit_metadata = None
+        st.session_state.uploaded_file_name = None
+        st.session_state.chat_history = []
+        st.session_state.explorer_option = "Select an option..."
+        st.session_state.explorer_search_term = ""
+        st.rerun()
+
 
 # --- Interactive Metadata Explorer in Sidebar ---
 if st.session_state.pbit_metadata:
-    metadata_sb = st.session_state.pbit_metadata
+    metadata_sb = st.session_state.pbit_metadata 
     
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔍 Explore Metadata")
@@ -80,64 +119,50 @@ if st.session_state.pbit_metadata:
     EXPLORER_OPTIONS = ("Select an option...", "Tables & Columns", "Measures", "Calculated Columns", 
                         "Relationships", "M Queries", "Report Structure")
 
-    # Determine the current index for the selectbox
-    current_explorer_option_value = st.session_state.get("explorer_option", EXPLORER_OPTIONS[0])
-    try:
-        current_index = EXPLORER_OPTIONS.index(current_explorer_option_value)
-    except ValueError: # If the saved option is somehow invalid, default to the first
-        current_index = 0
-        st.session_state.explorer_option = EXPLORER_OPTIONS[0]
+    # Callback for when the explorer option (selectbox) changes
+    def on_explorer_option_change():
+        # The selectbox value is automatically updated in st.session_state.explorer_option due to the key
+        # We just need to reset the search term when the category changes.
+        st.session_state.explorer_search_term = ""
+        # No st.rerun() needed here, Streamlit handles rerun on widget value change with a key.
 
-
-    # Update session state directly from selectbox's return value
-    # The `on_change` callback can also be used for more complex state updates if needed.
-    # Here, we directly assign the result to manage the state.
-    selected_option = st.sidebar.selectbox(
+    st.sidebar.selectbox(
         "Choose metadata to explore:",
         options=EXPLORER_OPTIONS,
-        index=current_index, 
-        key="sb_explore_selectbox" # A unique key for the selectbox itself
+        key="explorer_option", # Session state key directly links to st.session_state.explorer_option
+        on_change=on_explorer_option_change 
     )
-    # Update the session state if the selection changed
-    if selected_option != st.session_state.explorer_option:
-        st.session_state.explorer_option = selected_option
-        st.session_state.explorer_search_term = "" # Reset search on new category
-        st.rerun() # Rerun to reflect the new selection and clear search
-
-    # Use the persisted search term
-    st.session_state.explorer_search_term = st.sidebar.text_input(
-        "Search explorer:", 
-        value=st.session_state.explorer_search_term,
-        key="sb_explorer_search_input"
+    
+    # Text input for searching within the explorer view
+    # The value is directly bound to st.session_state.explorer_search_term via the key
+    st.sidebar.text_input(
+        "Search current explorer view:",
+        key="explorer_search_term" # Session state key
+        # No on_change needed here if filtering happens on each rerun based on this state.
+        # If live-as-you-type filtering is desired and needs to force a rerun, an on_change could be added.
     )
-    search_term_sb = st.session_state.explorer_search_term
+    search_term_sb = st.session_state.explorer_search_term.lower() # Get current search term for filtering
 
     # --- Display logic based on st.session_state.explorer_option ---
-    # (The content of these if/elif blocks remains the same as your previous full version)
-    # Ensure they all use st.session_state.explorer_option for their conditions
-
     if st.session_state.explorer_option == "Tables & Columns":
         st.sidebar.markdown("##### Tables and Columns")
         all_tables = sorted(metadata_sb.get("tables", []), key=lambda x: x.get("name", ""))
-        filtered_tables = []
-        if search_term_sb:
-            search_term_lower_sb = search_term_sb.lower()
-            for table in all_tables:
-                if search_term_lower_sb in table.get("name", "").lower() or \
-                   any(search_term_lower_sb in col.get("name","").lower() for col in table.get("columns",[])):
-                    filtered_tables.append(table)
-        else:
-            filtered_tables = all_tables
+        filtered_tables = [
+            t for t in all_tables if not search_term_sb or 
+            search_term_sb in t.get("name", "").lower() or 
+            any(search_term_sb in col.get("name","").lower() or search_term_sb in col.get("dataType","").lower() for col in t.get("columns",[]))
+        ] if metadata_sb.get("tables") else []
+        
         if filtered_tables:
             for table in filtered_tables:
                 table_name = table.get("name", "Unknown Table")
-                with st.sidebar.expander(f"Table: {table_name} ({len(table.get('columns',[]))} cols)"):
+                with st.sidebar.expander(f"Table: **{table_name}** ({len(table.get('columns',[]))} columns)"):
                     if table.get("columns"):
-                        cols_data = [{"Column": col.get("name"), "Type": col.get("dataType")} for col in table["columns"]]
+                        cols_data = [{"Column Name": col.get("name"), "Data Type": col.get("dataType")} for col in table["columns"]]
                         st.dataframe(pd.DataFrame(cols_data), use_container_width=True, height=min(250, (len(cols_data) + 1) * 35 + 3))
-                    else: st.write("No columns.")
-        elif search_term_sb : st.sidebar.info(f"No tables match '{search_term_sb}'.")
-        else: st.sidebar.info("No table data.")
+                    else: st.write("No columns found for this table.")
+        elif search_term_sb and metadata_sb.get("tables"): st.sidebar.info(f"No tables or columns match '{st.session_state.explorer_search_term}'.")
+        elif not metadata_sb.get("tables"): st.sidebar.info("No table information found.")
 
     elif st.session_state.explorer_option == "Measures":
         st.sidebar.markdown("##### DAX Measures")
@@ -145,10 +170,10 @@ if st.session_state.pbit_metadata:
         filtered_measures = filter_dict_items(all_measures, search_term_sb)
         if filtered_measures:
             for measure_name, formula in sorted(filtered_measures.items()):
-                with st.sidebar.expander(f"Measure: {measure_name}"):
+                with st.sidebar.expander(f"Measure: **{measure_name}**"):
                     st.code(formula, language="dax")
-        elif search_term_sb : st.sidebar.info(f"No measures match '{search_term_sb}'.")
-        else: st.sidebar.info("No DAX measures.")
+        elif search_term_sb and all_measures : st.sidebar.info(f"No measures match '{st.session_state.explorer_search_term}'.")
+        elif not all_measures : st.sidebar.info("No DAX measures found.")
 
     elif st.session_state.explorer_option == "Calculated Columns":
         st.sidebar.markdown("##### Calculated Columns")
@@ -156,112 +181,146 @@ if st.session_state.pbit_metadata:
         filtered_cc = filter_dict_items(all_cc, search_term_sb)
         if filtered_cc:
             for cc_name, formula in sorted(filtered_cc.items()):
-                with st.sidebar.expander(f"Calc Col: {cc_name}"):
+                with st.sidebar.expander(f"Calculated Column: **{cc_name}**"):
                     st.code(formula, language="dax")
-        elif search_term_sb : st.sidebar.info(f"No calc cols match '{search_term_sb}'.")
-        else: st.sidebar.info("No calculated columns.")
+        elif search_term_sb and all_cc : st.sidebar.info(f"No calculated columns match '{st.session_state.explorer_search_term}'.")
+        elif not all_cc : st.sidebar.info("No calculated columns found.")
     
     elif st.session_state.explorer_option == "Relationships":
         st.sidebar.markdown("##### Relationships")
-        if metadata_sb and "relationships" in metadata_sb:
-            all_rels = metadata_sb.get("relationships", [])
-            if not all_rels:
-                st.sidebar.info("No relationships found in PBIT.")
-            else:
-                filtered_rels = []
-                if search_term_sb:
-                    s_t_l_sb = search_term_sb.lower()
-                    for rel in all_rels:
-                        if s_t_l_sb in str(rel.get("fromTable","")).lower() or \
-                           s_t_l_sb in str(rel.get("toTable","")).lower() or \
-                           s_t_l_sb in str(rel.get("fromColumn","")).lower() or \
-                           s_t_l_sb in str(rel.get("toColumn","")).lower() or \
-                           s_t_l_sb in str(rel.get("crossFilteringBehavior","")).lower() or \
-                           s_t_l_sb in str(rel.get("isActive","")).lower():
-                            filtered_rels.append(rel)
-                else:
-                    filtered_rels = all_rels
-                if filtered_rels:
-                    rels_data = [{"From": f"{r.get('fromTable','?')}.{r.get('fromColumn','?')}",
-                                  "To": f"{r.get('toTable','?')}.{r.get('toColumn','?')}",
-                                  "Active": r.get("isActive", True), 
-                                  "Filter Dir.": r.get("crossFilteringBehavior", "N/A")}
-                                 for r in filtered_rels]
-                    df_rels = pd.DataFrame(rels_data)
-                    st.sidebar.dataframe(df_rels, use_container_width=True, height=min(300, (len(df_rels) + 1) * 35 + 3))
-                elif search_term_sb:
-                    st.sidebar.info(f"No relationships match '{search_term_sb}'.")
+        all_rels = metadata_sb.get("relationships", [])
+        if not all_rels:
+            st.sidebar.info("No relationships found.")
         else:
-            st.sidebar.info("Relationship data missing/invalid.")
+            filtered_rels = [
+                r for r in all_rels if not search_term_sb or 
+                search_term_sb in str(r.get("fromTable","")).lower() or 
+                search_term_sb in str(r.get("toTable","")).lower() or 
+                search_term_sb in str(r.get("fromColumn","")).lower() or 
+                search_term_sb in str(r.get("toColumn","")).lower()
+            ]
+            if filtered_rels:
+                rels_data = [{"From": f"{r.get('fromTable','?')}.{r.get('fromColumn','?')}",
+                              "To": f"{r.get('toTable','?')}.{r.get('toColumn','?')}",
+                              "Active": r.get("isActive", True), 
+                              "Filter Dir.": r.get("crossFilteringBehavior", "N/A")}
+                             for r in filtered_rels]
+                df_rels = pd.DataFrame(rels_data)
+                st.sidebar.dataframe(df_rels, use_container_width=True, height=min(300, (len(df_rels) + 1) * 35 + 3))
+            elif search_term_sb:
+                st.sidebar.info(f"No relationships match '{st.session_state.explorer_search_term}'.")
 
     elif st.session_state.explorer_option == "M Queries":
         st.sidebar.markdown("##### M (Power Query) Scripts")
         all_m_queries = sorted(metadata_sb.get("m_queries", []), key=lambda x: x.get("table_name", ""))
-        filtered_m_queries = []
-        if search_term_sb:
-            s_t_l_sb = search_term_sb.lower()
-            for mq in all_m_queries:
-                if s_t_l_sb in mq.get("table_name","").lower() or s_t_l_sb in mq.get("script","").lower() or \
-                   any(s_t_l_sb in s.lower() for s in mq.get("analysis",{}).get("sources",[])) or \
-                   any(s_t_l_sb in t.lower() for t in mq.get("analysis",{}).get("transformations",[])):
-                    filtered_m_queries.append(mq)
-        else:
-            filtered_m_queries = all_m_queries
+        filtered_m_queries = [
+            mq for mq in all_m_queries if not search_term_sb or 
+            search_term_sb in mq.get("table_name","").lower() or 
+            search_term_sb in mq.get("script","").lower() or
+            any(search_term_sb in s.lower() for s in mq.get("analysis",{}).get("sources",[])) or
+            any(search_term_sb in t.lower() for t in mq.get("analysis",{}).get("transformations",[]))
+        ]
         if filtered_m_queries:
             for mq_info in filtered_m_queries:
-                with st.sidebar.expander(f"M Query: {mq_info.get('table_name', '?')}"):
+                with st.sidebar.expander(f"M Query for Table: **{mq_info.get('table_name', '?')}**"):
                     analysis = mq_info.get("analysis", {})
-                    st.markdown(f"**Src:** {', '.join(analysis.get('sources', ['N/A']))}")
-                    st.markdown(f"**Transf:** {', '.join(analysis.get('transformations', ['N/A']))}")
+                    st.markdown(f"**Identified Sources:** {', '.join(analysis.get('sources', ['N/A']))}")
+                    st.markdown(f"**Common Transformations:** {', '.join(analysis.get('transformations', ['N/A']))}")
+                    st.markdown("**Script:**")
                     st.code(mq_info.get("script", "N/A"), language="powerquery")
-        elif search_term_sb : st.sidebar.info(f"No M Queries match '{search_term_sb}'.")
-        else: st.sidebar.info("No M Queries.")
+        elif search_term_sb and metadata_sb.get("m_queries"): st.sidebar.info(f"No M Queries match '{st.session_state.explorer_search_term}'.")
+        elif not metadata_sb.get("m_queries"): st.sidebar.info("No M Query information found.")
 
     elif st.session_state.explorer_option == "Report Structure":
-        st.sidebar.markdown("##### Report Structure")
+        st.sidebar.markdown("##### Report Structure (Pages & Visuals)")
         all_pages = sorted(metadata_sb.get("report_pages", []), key=lambda x: x.get("name", ""))
-        filtered_pages = []
-        if search_term_sb:
-            s_t_l_sb = search_term_sb.lower()
-            for page in all_pages:
-                if s_t_l_sb in page.get("name","").lower() or \
-                   any(s_t_l_sb in str(v.get("title","")).lower() or \
-                       s_t_l_sb in str(v.get("type","")).lower() or \
-                       any(s_t_l_sb in f.lower() for f in v.get("fields_used",[])) for v in page.get("visuals",[])):
-                    filtered_pages.append(page)
-        else:
-            filtered_pages = all_pages
+        filtered_pages = [
+            p for p in all_pages if not search_term_sb or
+            search_term_sb in p.get("name","").lower() or
+            any(search_term_sb in str(v.get("title","")).lower() or
+                search_term_sb in str(v.get("type","")).lower() or
+                any(search_term_sb in f.lower() for f in v.get("fields_used",[])) 
+                for v in p.get("visuals",[]))
+        ]
         if filtered_pages:
             for page in filtered_pages:
-                with st.sidebar.expander(f"Page: {page.get('name', '?')} ({len(page.get('visuals',[]))} visuals)"):
+                page_name = page.get("name", "Unknown Page")
+                with st.sidebar.expander(f"Page: **{page_name}** ({len(page.get('visuals',[]))} visuals)"):
                     if page.get("visuals"):
                         for visual in page["visuals"]:
-                            v_title = visual.get('title') or visual.get('type', 'Unknown')
-                            st.markdown(f"**{v_title}** (Type: {visual.get('type', 'N/A')})")
+                            # --- REVERTED FORMATTING HERE ---
+                            visual_title_or_type = visual.get('title') if visual.get('title') else visual.get('type', 'Unknown Visual')
+                            st.markdown(f"**{visual_title_or_type}** (Type: {visual.get('type', 'N/A')})")
                             fields = visual.get("fields_used", [])
-                            if fields: st.caption(f"Fields: {', '.join(f'`{f}`' for f in fields)}")
-                            else: st.caption("_No fields identified._")
-                    else: st.write("No visuals.")
-        elif search_term_sb : st.sidebar.info(f"No report items match '{search_term_sb}'.")
-        else: st.sidebar.info("No report structure.")
-
+                            if fields:
+                                # Using st.caption for a more compact display of fields
+                                st.caption(f"Fields: {', '.join(f'`{f}`' for f in fields)}")
+                            else:
+                                st.caption("_No specific fields identified._")
+                            # Removed the extra "---" for a slightly cleaner look between visuals, optional
+                            # st.markdown("---") 
+                            # --- END OF REVERTED FORMATTING ---
+                    else:
+                        st.write("No visuals found on this page.")
+        elif search_term_sb and metadata_sb.get("report_pages"): st.sidebar.info(f"No report items match '{st.session_state.explorer_search_term}'.")
+        elif not metadata_sb.get("report_pages"): st.sidebar.info("No report structure information found.")
 
 # --- Main Page: Chatbot Interface ---
-st.header("💬 PBIT Chatbot")
+st.header("📊 PBIT Chatbot")
+
 if not st.session_state.pbit_metadata:
-    st.info("☝️ Upload a .pbit file using the sidebar to analyze and chat about its metadata.")
+    st.info("👈 Upload a .pbit file using the sidebar to analyze and chat about its metadata.")
 else:
     st.caption(f"Currently analyzing: **{st.session_state.pbit_metadata.get('file_name', 'N/A')}**")
+
+    # Apply max-height for the chat container
+    chat_box_style = (
+        "max-height: 500px; "  # Or your preferred max scrollable height
+        "overflow-y: auto; "
+        "padding: 10px; "
+        "border-radius: 5px; "
+        "margin-bottom: 10px;"
+        # Optional: Add a min-height if you want the box to have some presence even when empty
+        # "min-height: 100px;" 
+    )
+    st.markdown(f'<div id="chat-messages-container" style="{chat_box_style}">', unsafe_allow_html=True)
+    
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(message["content"]) # Display the message content
+    
+    st.markdown('</div>', unsafe_allow_html=True) # Close the chat messages container div
+
+    # JavaScript for auto-scrolling, keyed to run_id to force re-execution
+    js_key_for_html_component = f"auto_scroll_js_{st.session_state.run_id}"
+    js_autoscroll = f"""
+    <script name="{js_key_for_html_component}"> // Add a name for debugging
+        // console.log("Auto-scroll script '{js_key_for_html_component}' attempting to execute...");
+        setTimeout(function() {{
+            var chatContainer = document.getElementById("chat-messages-container");
+            if (chatContainer) {{
+                // console.log("Found chat-messages-container, scrolling to bottom:", chatContainer.scrollHeight);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }} else {{
+                // console.log("chat-messages-container NOT found by script '{js_key_for_html_component}'.");
+            }}
+        }}, 150); // Delay to allow DOM update
+    </script>
+    """
+    # Use st.components.v1.html for more reliable JS execution
+    if st.session_state.chat_history: # Only inject if there are messages
+        st.components.v1.html(js_autoscroll, height=0, scrolling=False)
+
+    # Chat input
     if prompt := st.chat_input("Ask about the PBIT metadata..."):
         st.session_state.chat_history.append({"role": "user", "content": prompt})
-        with st.chat_message("user"): st.markdown(prompt)
-        with st.chat_message("assistant"):
-            with st.spinner("Thinking..."): response = process_query(prompt, st.session_state.pbit_metadata)
-            st.markdown(response)
+        
+        with st.spinner("Thinking..."):
+            response = process_query(prompt, st.session_state.pbit_metadata)
+        
         st.session_state.chat_history.append({"role": "assistant", "content": response})
+        st.session_state.run_id += 1 # Increment to ensure JS runs again
+        st.rerun() # Rerun to display new messages and trigger scroll
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Created with Streamlit.")
+st.sidebar.caption("PBIT Chatbot - Developed by Marvin Heng")
