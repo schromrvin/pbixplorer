@@ -66,6 +66,7 @@ pbit-chatbot/
 ├── pbit_parser.py           # Module to parse .pbit files & M queries
 ├── chatbot_logic.py         # Module for NLP and query answering
 ├── requirements.txt         # Python dependencies
+├── .gitignore               # Git ignore
 └── README.md                # This file
 ```
 
