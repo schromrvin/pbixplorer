@@ -1,2 +1,41 @@
+# Python bytecode
 __pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+# If you create your venv inside the project directory, uncomment the next line
+# venv/
+# If your venv is named differently, adjust accordingly (e.g., .venv/)
+
+# Temporary files and directories
 temp_extracted/
+*.tmp
+*.temp
+*~
+*.swp 
+*.swo
+
+# PBIT files (if you don't want to commit example/test .pbit files to the repo)
+# *.pbit 
+# *.pbix
+
+# Dummy/test files created by parser script (if any are left behind)
+dummy_*.pbit
+dummy_*.zip 
+dummy_pbit_contents*/
+
+# Streamlit specific (usually not needed to ignore, but good to be aware)
+# .streamlit/
+
+# OS-generated files
+.DS_Store # macOS
+Thumbs.db # Windows
+Desktop.ini # Windows
+
+# IDE specific folders (examples, add your own if needed)
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
