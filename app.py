@@ -15,6 +15,8 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "uploaded_file_name" not in st.session_state:
     st.session_state.uploaded_file_name = None
+if "original_uploaded_file_name" not in st.session_state: # ADD THIS LINE
+    st.session_state.original_uploaded_file_name = None
 if "explorer_search_term" not in st.session_state: 
     st.session_state.explorer_search_term = ""
 # Initialize explorer_option correctly
@@ -43,6 +45,13 @@ st.sidebar.markdown("---")
 # --- File Upload in Sidebar ---
 # Use a callback to reset dependent states when a new file is uploaded
 def on_file_upload_change():
+    if st.session_state.pbit_uploader is None and st.session_state.pbit_metadata is not None:
+        st.session_state.pbit_metadata = None
+        st.session_state.original_uploaded_file_name = None # ADD THIS RESET
+        st.session_state.uploaded_file_name = None # You might already have this or similar
+        st.session_state.chat_history = []
+        st.session_state.explorer_option = "Select an option..."
+        st.session_state.explorer_search_term = ""
     # This function is called when the file uploader's value changes.
     # If a new file is uploaded, uploaded_file will not be None.
     # If the file is removed, uploaded_file will be None.
@@ -65,24 +74,24 @@ uploaded_file = st.sidebar.file_uploader(
 )
 
 if uploaded_file is not None:
-    # Process if it's a new file name or if metadata hasn't been loaded for the current file
-    if st.session_state.uploaded_file_name != uploaded_file.name or st.session_state.pbit_metadata is None:
+    # Process if it's a new file name or if metadata is not loaded for the *original* file name
+    if st.session_state.original_uploaded_file_name != uploaded_file.name or st.session_state.pbit_metadata is None: # MODIFIED condition slightly
         st.session_state.chat_history = [] 
-        st.session_state.uploaded_file_name = uploaded_file.name
-        st.session_state.pbit_metadata = None # Reset metadata explicitly before parsing new file
+        st.session_state.original_uploaded_file_name = uploaded_file.name # STORE ORIGINAL NAME
+        st.session_state.pbit_metadata = None 
         
-        with st.spinner(f"Processing '{uploaded_file.name}'..."):
+        with st.spinner(f"Processing '{uploaded_file.name}'..."): # USE ORIGINAL NAME in spinner
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pbit") as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
                 temp_file_path = tmp_file.name
             
             try:
-                metadata = parse_pbit_file(temp_file_path)
-                st.session_state.pbit_metadata = metadata # Store parsed metadata
+                metadata = parse_pbit_file(temp_file_path) 
+                st.session_state.pbit_metadata = metadata
                 if metadata:
-                    st.sidebar.success(f"Parsed '{uploaded_file.name}'!")
+                    st.sidebar.success(f"Parsed '{st.session_state.original_uploaded_file_name}'!") # USE ORIGINAL NAME
                     st.session_state.chat_history = [
-                        {"role": "assistant", "content": f"Analyzed '{metadata.get('file_name', 'your file')}'. How can I help you today?"}
+                        {"role": "assistant", "content": f"Analyzed '**{st.session_state.original_uploaded_file_name}**'. How can I help you today?"} # USE ORIGINAL NAME
                     ]
                     st.session_state.explorer_option = "Select an option..." 
                     st.session_state.explorer_search_term = ""
@@ -90,24 +99,24 @@ if uploaded_file is not None:
                 else:
                     st.sidebar.error("Could not parse the PBIT file. Check console for parser warnings.")
                     st.session_state.pbit_metadata = None 
+                    st.session_state.original_uploaded_file_name = None # RESET if parsing failed
             except Exception as e:
                 st.sidebar.error(f"An error occurred during PBIT processing: {e}")
                 st.session_state.pbit_metadata = None
+                st.session_state.original_uploaded_file_name = None # RESET on exception
             finally:
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path) 
-                st.rerun() # Rerun to reflect the new state (metadata loaded or error shown)
-# This else handles the case where a file was previously loaded but then removed by the user
-elif st.session_state.uploaded_file_name is not None and uploaded_file is None:
+                st.rerun() 
+elif st.session_state.original_uploaded_file_name is not None and uploaded_file is None: # MODIFIED: check original_uploaded_file_name
     # This means the file uploader was cleared by the user
-    if st.session_state.pbit_metadata is not None: # If there was metadata, clear it
+    if st.session_state.pbit_metadata is not None: 
         st.session_state.pbit_metadata = None
-        st.session_state.uploaded_file_name = None
+        st.session_state.original_uploaded_file_name = None # RESET original name
         st.session_state.chat_history = []
         st.session_state.explorer_option = "Select an option..."
         st.session_state.explorer_search_term = ""
         st.rerun()
-
 
 # --- Interactive Metadata Explorer in Sidebar ---
 if st.session_state.pbit_metadata:
@@ -271,7 +280,9 @@ st.header("📊 PBIT Chatbot")
 if not st.session_state.pbit_metadata:
     st.info("👈 Upload a .pbit file using the sidebar to analyze and chat about its metadata.")
 else:
-    st.caption(f"Currently analyzing: **{st.session_state.pbit_metadata.get('file_name', 'N/A')}**")
+    # Use the original uploaded filename for display
+    display_filename = st.session_state.get("original_uploaded_file_name", "N/A") # NEW LINE
+    st.caption(f"Currently analyzing: **{display_filename}**") # MODIFIED LINE
 
     # Apply max-height for the chat container
     chat_box_style = (
