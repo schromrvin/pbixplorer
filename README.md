@@ -42,6 +42,8 @@ A local, Streamlit-based application to analyze and explore the metadata of Powe
 
 You can test the app hosted at **https://pbit-chatbot.streamlit.app/**.
 
+*(sample .pbit files can be found in the [templates](templates) folder of the repository)*
+
 ## Why this tool? 🤔
 
 Understanding the structure and components of complex Power BI files can be challenging. This tool aims to simplify this by providing:
@@ -62,12 +64,13 @@ Understanding the structure and components of complex Power BI files can be chal
 
 ```
 pbit-chatbot/
-├── app.py                   # Main Streamlit application
-├── pbit_parser.py           # Module to parse .pbit files & M queries
-├── chatbot_logic.py         # Module for NLP and query answering
-├── requirements.txt         # Python dependencies
+├── templates/               # Includes .pbit files for testing
 ├── .gitignore               # Git ignore
-└── README.md                # This file
+├── app.py                   # Main Streamlit application
+├── chatbot_logic.py         # Module for NLP and query answering
+├── pbit_parser.py           # Module to parse .pbit files & M queries
+├── README.md                # This file
+└── requirements.txt         # Python dependencies
 ```
 
 ## Setup & Installation 🚀
