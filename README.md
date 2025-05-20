@@ -67,7 +67,7 @@ pbit-chatbot/
 ├── templates/               # Includes .pbit files for testing
 ├── .gitignore               # Git ignore
 ├── app.py                   # Main Streamlit application
-├── chatbot_logic.py         # Module for NLP and query answering
+├── chatbot_logic.py         # Module for query answering
 ├── pbit_parser.py           # Module to parse .pbit files & M queries
 ├── README.md                # This file
 └── requirements.txt         # Python dependencies
