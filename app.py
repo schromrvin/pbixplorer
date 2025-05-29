@@ -2,15 +2,19 @@ import streamlit as st
 import os
 import tempfile
 import pandas as pd
-import zipfile # For opening PBIX to get Report/Layout
+import zipfile
 from pbit_parser import parse_pbit_file, extract_report_layout_from_zip
-from chatbot_logic import process_query
-# from pbixray_lib.core import PBIXRay # Will be imported conditionally
+# Now import the Gemini-specific functions from chatbot_logic
+from chatbot_logic import configure_gemini_model, process_query_with_gemini
 
 # --- Page Configuration ---
-st.set_page_config(page_title="PBIT/PBIX Chatbot & Explorer", layout="wide")
+st.set_page_config(page_title="PBIXpert Chatbot & Explorer", layout="wide") # Renamed
 
 # --- Session State Initialization ---
+if "gemini_api_key" not in st.session_state:
+    st.session_state.gemini_api_key = ""
+if "gemini_configured" not in st.session_state:
+    st.session_state.gemini_configured = False
 if "pbit_metadata" not in st.session_state:
     st.session_state.pbit_metadata = None
 if "pbix_object" not in st.session_state:
@@ -21,25 +25,23 @@ if "active_file_type" not in st.session_state:
     st.session_state.active_file_type = None
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "uploaded_file_name" not in st.session_state:
+if "uploaded_file_name" not in st.session_state: # Key for file_uploader widget
     st.session_state.uploaded_file_name = None
-if "original_uploaded_file_name" not in st.session_state:
+if "original_uploaded_file_name" not in st.session_state: # Stored name of successfully parsed file
     st.session_state.original_uploaded_file_name = None
 if "explorer_search_term" not in st.session_state:
     st.session_state.explorer_search_term = ""
 if "explorer_option" not in st.session_state:
     st.session_state.explorer_option = "Select an option..."
-if "run_id" not in st.session_state:
+if "run_id" not in st.session_state: # For JS scroll
     st.session_state.run_id = 0
-# No longer need view_data_table_name for main area display from sidebar
-# if "view_data_table_name" not in st.session_state:
-#     st.session_state.view_data_table_name = None
-if "sidebar_pbix_table_select" not in st.session_state: # For PBIX table data selection in sidebar
-    st.session_state.sidebar_pbix_table_select = "Select a table..."
+if "sidebar_pbix_table_select_viewer" not in st.session_state: # For PBIX table data selection in sidebar
+    st.session_state.sidebar_pbix_table_select_viewer = "Select a table..."
 
 
 # --- Helper function for filtering dictionary items (for PBIT explorer) ---
 def filter_dict_items(items_dict, search_term):
+    # ... (same as before) ...
     if not search_term: return items_dict
     search_term_lower = search_term.lower()
     return {
@@ -49,116 +51,165 @@ def filter_dict_items(items_dict, search_term):
     }
 
 # --- Sidebar UI ---
-st.sidebar.title("📊 PBIT/PBIX Analyzer")
+st.sidebar.title("📊 PBIXpert Analyzer") # Renamed
 st.sidebar.markdown("---")
+
+# Gemini API Key Input
+st.sidebar.subheader("Gemini API Configuration")
+api_key_input = st.sidebar.text_input(
+    "Enter your Gemini API Key",
+    type="password",
+    key="gemini_api_key_input", # Use a different key from session_state.gemini_api_key if needed for on_change
+    value=st.session_state.gemini_api_key
+)
+
+if api_key_input and api_key_input != st.session_state.gemini_api_key:
+    st.session_state.gemini_api_key = api_key_input
+    st.session_state.gemini_configured = False # Force reconfigure
+
+if st.session_state.gemini_api_key and not st.session_state.gemini_configured:
+    with st.spinner("Configuring Gemini Model..."):
+        config_success = configure_gemini_model(st.session_state.gemini_api_key)
+        if config_success:
+            st.session_state.gemini_configured = True
+            st.sidebar.success("Gemini model configured!")
+            st.rerun() # Rerun to reflect change and potentially clear spinner if it was quick
+        else:
+            st.sidebar.error("Failed to configure Gemini. Check API key and console.")
+            st.session_state.gemini_configured = False
+elif not st.session_state.gemini_api_key:
+    st.sidebar.warning("Please enter your Gemini API Key to enable the chatbot.")
+    st.session_state.gemini_configured = False
+
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("File Upload")
 
 # --- File Upload in Sidebar ---
 def on_file_upload_change():
-    if st.session_state.get("pbit_uploader") is None:
+    # ... (same as before, ensure all relevant states are reset) ...
+    if st.session_state.get("pbit_uploader_widget") is None: # Check the widget's key
         if st.session_state.active_file_type is not None:
             st.session_state.pbit_metadata = None
             st.session_state.pbix_object = None
             st.session_state.pbix_report_layout = None
             st.session_state.active_file_type = None
             st.session_state.original_uploaded_file_name = None
-            st.session_state.chat_history = []
+            st.session_state.chat_history = [] # Clear chat when file is removed
             st.session_state.explorer_option = "Select an option..."
             st.session_state.explorer_search_term = ""
-            # st.session_state.view_data_table_name = None # Removed
-            st.session_state.sidebar_pbix_table_select = "Select a table..."
+            st.session_state.sidebar_pbix_table_select_viewer = "Select a table..."
             st.session_state.run_id += 1
+            # st.rerun() # Let main flow handle rerun
 
 uploaded_file = st.sidebar.file_uploader(
     "Choose a .pbit or .pbix file",
     type=["pbit", "pbix"],
-    key="pbit_uploader",
+    key="pbit_uploader_widget", # Use a distinct key for the widget itself
     on_change=on_file_upload_change
 )
 
+# Processing logic for uploaded_file
 if uploaded_file is not None:
-    if st.session_state.original_uploaded_file_name != uploaded_file.name or st.session_state.active_file_type is None:
-        st.session_state.chat_history = []
-        st.session_state.original_uploaded_file_name = uploaded_file.name
+    # If it's a new file OR if the current original_uploaded_file_name doesn't match (meaning a different file was uploaded)
+    if st.session_state.original_uploaded_file_name != uploaded_file.name or not st.session_state.active_file_type:
+        # This is a new file upload or re-upload of a different file
+        st.session_state.chat_history = [
+             {"role": "assistant", "content": f"Processing '{uploaded_file.name}'..."} # Initial message
+        ] if st.session_state.gemini_configured else [
+             {"role": "assistant", "content": f"Processing '{uploaded_file.name}'. Note: Gemini not configured."}
+        ]
+        st.session_state.original_uploaded_file_name = uploaded_file.name # Set early
         st.session_state.pbit_metadata = None
         st.session_state.pbix_object = None
         st.session_state.pbix_report_layout = None
-        st.session_state.active_file_type = None
+        st.session_state.active_file_type = None # Will be set after successful parsing
         st.session_state.explorer_option = "Select an option..."
         st.session_state.explorer_search_term = ""
-        # st.session_state.view_data_table_name = None # Removed
-        st.session_state.sidebar_pbix_table_select = "Select a table..."
+        st.session_state.sidebar_pbix_table_select_viewer = "Select a table..."
         st.session_state.run_id += 1
 
-        with st.spinner(f"Processing '{uploaded_file.name}'..."):
+        with st.spinner(f"Analyzing '{uploaded_file.name}'... This may take a moment."):
             file_extension = os.path.splitext(uploaded_file.name)[1]
+            # Create a temporary file with the correct extension
             with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
                 temp_file_path = tmp_file.name
 
             report_layout_info_msg = ""
+            initial_bot_message = f"Okay, I've analyzed **{uploaded_file.name}**. How can I help you with it?"
 
             try:
                 if uploaded_file.name.endswith(".pbit"):
                     st.session_state.active_file_type = "pbit"
                     metadata = parse_pbit_file(temp_file_path)
                     st.session_state.pbit_metadata = metadata
-                    if metadata:
-                        st.sidebar.success(f"Parsed PBIT '{st.session_state.original_uploaded_file_name}'!")
-                        st.session_state.chat_history = [
-                            {"role": "assistant", "content": f"Analyzed PBIT '**{st.session_state.original_uploaded_file_name}**'. How can I help you today?"}
-                        ]
+                    if not metadata:
+                        initial_bot_message = f"Could not fully parse PBIT file '{uploaded_file.name}'. Some information might be missing."
+                        st.sidebar.error(f"PBIT parsing failed for {uploaded_file.name}.")
+                        st.session_state.active_file_type = None # Parsing failed
                     else:
-                        st.sidebar.error("Could not parse the PBIT file. Check console for parser warnings.")
-                        st.session_state.active_file_type = None; st.session_state.original_uploaded_file_name = None
+                        st.sidebar.success(f"PBIT '{uploaded_file.name}' parsed!")
 
                 elif uploaded_file.name.endswith(".pbix"):
-                    from pbixray_lib.core import PBIXRay
+                    from pbixray_lib.core import PBIXRay # Import here
                     st.session_state.active_file_type = "pbix"
                     pbix_obj = PBIXRay(temp_file_path)
                     st.session_state.pbix_object = pbix_obj
 
-                    try:
+                    try: # Attempt to parse Report/Layout from PBIX
                         with zipfile.ZipFile(temp_file_path, 'r') as pbix_zip_for_layout:
                             report_layout_data = extract_report_layout_from_zip(pbix_zip_for_layout)
                             if report_layout_data:
                                 st.session_state.pbix_report_layout = report_layout_data
-                                report_layout_info_msg = "Report layout also parsed."
+                                report_layout_info_msg = " Report layout was also parsed."
                             else:
-                                report_layout_info_msg = "Report layout not found or could not be parsed from PBIX."
-                    except Exception as e_layout:
-                        report_layout_info_msg = f"Note: Error parsing PBIX report layout: {str(e_layout)[:50]}..."
-                        print(f"Warning: Error parsing PBIX report layout: {e_layout}")
+                                report_layout_info_msg = " Report layout not found or could not be parsed from this PBIX."
+                    except Exception: # Silently fail on report layout for PBIX for now
+                        report_layout_info_msg = " Note: Could not parse report layout from PBIX."
                         st.session_state.pbix_report_layout = None
+                    
+                    initial_bot_message = f"Okay, I've analyzed PBIX file **{uploaded_file.name}**. {report_layout_info_msg} What can I help you analyze?"
+                    st.sidebar.success(f"PBIX '{uploaded_file.name}' parsed!{report_layout_info_msg}")
 
-                    st.sidebar.success(f"Parsed PBIX '{st.session_state.original_uploaded_file_name}'! {report_layout_info_msg}")
-                    st.session_state.chat_history = [
-                        {"role": "assistant", "content": f"Analyzed PBIX '**{st.session_state.original_uploaded_file_name}**'. {report_layout_info_msg} How can I help you today?"}
-                    ]
-                else:
+                else: # Should not happen
+                    initial_bot_message = f"Unsupported file type: {uploaded_file.name}."
                     st.sidebar.error(f"Unsupported file type: {uploaded_file.name}")
-                    st.session_state.active_file_type = None; st.session_state.original_uploaded_file_name = None
+                    st.session_state.active_file_type = None
+
             except Exception as e:
-                st.sidebar.error(f"An error occurred during processing: {e}")
+                initial_bot_message = f"An error occurred during processing of '{uploaded_file.name}': {e}"
+                st.sidebar.error(f"Processing error: {e}")
                 st.session_state.pbit_metadata = None; st.session_state.pbix_object = None
                 st.session_state.pbix_report_layout = None; st.session_state.active_file_type = None
-                st.session_state.original_uploaded_file_name = None
+                st.session_state.original_uploaded_file_name = None # Reset if processing failed entirely
             finally:
                 if os.path.exists(temp_file_path):
                     os.remove(temp_file_path)
-                st.rerun()
+            
+            # Update chat history after processing
+            if st.session_state.active_file_type: # Only if parsing was somewhat successful
+                 st.session_state.chat_history = [{"role": "assistant", "content": initial_bot_message}]
+            else: # Parsing failed
+                 st.session_state.chat_history = [{"role": "assistant", "content": f"Failed to process '{uploaded_file.name}'. Please try another file."}]
+            st.rerun()
 
-elif st.session_state.active_file_type is not None and uploaded_file is None:
-    st.rerun()
+# This handles the case where the file is REMOVED from the uploader
+elif st.session_state.original_uploaded_file_name is not None and uploaded_file is None:
+    # on_file_upload_change should have handled resets. This rerun ensures UI updates.
+    if st.session_state.active_file_type is not None : # If something was active, and now it's gone
+        st.rerun()
 
 
 # --- Interactive Metadata Explorer in Sidebar ---
+# (This section remains largely the same as in the previous response, with corrected PBIXRay attribute access)
 if st.session_state.active_file_type:
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔍 Explore Metadata")
 
     EXPLORER_OPTIONS_BASE = ("Select an option...", "Tables & Columns", "Measures", "Calculated Columns",
                                "Relationships", "M Queries", "Report Structure")
-    EXPLORER_OPTIONS_PBIX_EXTRA = ("Table Data",) # Renamed for clarity
+    EXPLORER_OPTIONS_PBIX_EXTRA = ("View Table Data (Sidebar)",)
 
     if st.session_state.active_file_type == "pbit":
         EXPLORER_OPTIONS = EXPLORER_OPTIONS_BASE
@@ -167,11 +218,10 @@ if st.session_state.active_file_type:
     else:
         EXPLORER_OPTIONS = ("Select an option...",)
 
-    def on_explorer_option_change_sb(): # Renamed to avoid conflict if any other on_explorer_option_change exists
+    def on_explorer_option_change_sb():
         st.session_state.explorer_search_term = ""
-        # If explorer option changes, reset the PBIX table selection for sidebar view
-        if st.session_state.explorer_option != "Table Data":
-            st.session_state.sidebar_pbix_table_select = "Select a table..."
+        if st.session_state.explorer_option != "View Table Data (Sidebar)":
+            st.session_state.sidebar_pbix_table_select_viewer = "Select a table..."
 
     st.sidebar.selectbox(
         "Choose metadata to explore:",
@@ -180,14 +230,12 @@ if st.session_state.active_file_type:
         on_change=on_explorer_option_change_sb
     )
 
-    # Only show search bar if not viewing table data directly (as search is not applied there)
-    if st.session_state.explorer_option != "Table Data":
+    if st.session_state.explorer_option != "View Table Data (Sidebar)":
         st.sidebar.text_input(
             "Search current explorer view:",
             key="explorer_search_term"
         )
     search_term_sb = st.session_state.explorer_search_term.lower()
-
 
     if st.session_state.explorer_option == "Tables & Columns":
         st.sidebar.markdown("##### Tables and Columns")
@@ -214,7 +262,7 @@ if st.session_state.active_file_type:
         elif st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
             pbix_md = st.session_state.pbix_object
             all_table_names_pbix = sorted(list(pbix_md.tables))
-            schema_df = pbix_md.schema # This is a property returning a DataFrame
+            schema_df = pbix_md.schema # Access property
 
             filtered_table_names = [
                 name for name in all_table_names_pbix if not search_term_sb or
@@ -242,7 +290,6 @@ if st.session_state.active_file_type:
             metadata_sb_pbit = st.session_state.pbit_metadata
             all_measures = metadata_sb_pbit.get("measures", {})
             filtered_measures = filter_dict_items(all_measures, search_term_sb)
-            # ... (rest of PBIT measure display) ...
             if filtered_measures:
                 for measure_name, formula in sorted(filtered_measures.items()):
                     with st.sidebar.expander(f"Measure: **{measure_name}**"):
@@ -252,7 +299,7 @@ if st.session_state.active_file_type:
 
         elif st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
             pbix_md = st.session_state.pbix_object
-            dax_measures_df = pbix_md.dax_measures # CORRECTED: Access property
+            dax_measures_df = pbix_md.dax_measures # Property
             if dax_measures_df is not None and not dax_measures_df.empty:
                 filtered_measures_df = dax_measures_df[
                     dax_measures_df.apply(lambda row: search_term_sb in f"{row['TableName']}.{row['Name']}".lower() or \
@@ -275,7 +322,6 @@ if st.session_state.active_file_type:
         if st.session_state.active_file_type == "pbit" and st.session_state.pbit_metadata:
             pbit_meta = st.session_state.pbit_metadata
             all_cc = pbit_meta.get("calculated_columns", {})
-            # ... (rest of PBIT CC display) ...
             filtered_cc = filter_dict_items(all_cc, search_term_sb)
             if filtered_cc:
                 for cc_name, formula in sorted(filtered_cc.items()):
@@ -286,7 +332,7 @@ if st.session_state.active_file_type:
 
         elif st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
             pbix_obj = st.session_state.pbix_object
-            dax_columns_df = pbix_obj.dax_columns # CORRECTED: Access property
+            dax_columns_df = pbix_obj.dax_columns # Property
             if dax_columns_df is not None and not dax_columns_df.empty:
                 filtered_cc_df = dax_columns_df[
                     dax_columns_df.apply(lambda row: search_term_sb in f"{row['TableName']}.{row['ColumnName']}".lower() or \
@@ -301,10 +347,10 @@ if st.session_state.active_file_type:
                 elif search_term_sb: st.sidebar.info(f"No PBIX calculated columns match '{st.session_state.explorer_search_term}'.")
             else: st.sidebar.info("No calculated columns found in PBIX.")
 
+    # ... M Queries, Relationships, Report Structure (same as previous, ensure correct property access for PBIXRay) ...
     elif st.session_state.explorer_option == "M Queries" or st.session_state.explorer_option == "M Queries (Power Query)":
         st.sidebar.markdown("##### M (Power Query) Scripts")
         if st.session_state.active_file_type == "pbit" and st.session_state.pbit_metadata:
-            # ... (PBIT M Query display from previous response) ...
             metadata_sb_pbit = st.session_state.pbit_metadata
             all_m_queries = sorted(metadata_sb_pbit.get("m_queries", []), key=lambda x: x.get("table_name", ""))
             filtered_m_queries = [
@@ -327,9 +373,8 @@ if st.session_state.active_file_type:
 
         elif st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
             pbix_md = st.session_state.pbix_object
-            power_query_df = pbix_md.power_query # Access property
+            power_query_df = pbix_md.power_query # Property
             if power_query_df is not None and not power_query_df.empty:
-                # ... (PBIX M Query display from previous response) ...
                 filtered_pq_df = power_query_df[
                     power_query_df.apply(lambda row: search_term_sb in str(row['TableName']).lower() or \
                                                        search_term_sb in str(row['Expression']).lower(), axis=1)
@@ -345,7 +390,6 @@ if st.session_state.active_file_type:
     elif st.session_state.explorer_option == "Relationships":
         st.sidebar.markdown("##### Relationships")
         if st.session_state.active_file_type == "pbit" and st.session_state.pbit_metadata:
-            # ... (PBIT Relationship display from previous response) ...
             metadata_sb_pbit = st.session_state.pbit_metadata
             all_rels = metadata_sb_pbit.get("relationships", [])
             if not all_rels: st.sidebar.info("No relationships found.")
@@ -369,9 +413,8 @@ if st.session_state.active_file_type:
                     st.sidebar.info(f"No relationships match '{st.session_state.explorer_search_term}'.")
         elif st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
             pbix_md = st.session_state.pbix_object
-            relationships_df = pbix_md.relationships # Access property
+            relationships_df = pbix_md.relationships # Property
             if relationships_df is not None and not relationships_df.empty:
-                # ... (PBIX Relationship display from previous response) ...
                 filtered_rels_df = relationships_df[
                     relationships_df.apply(lambda row: search_term_sb in str(row['FromTableName']).lower() or \
                                                        search_term_sb in str(row['FromColumnName']).lower() or \
@@ -381,13 +424,13 @@ if st.session_state.active_file_type:
 
                 if not filtered_rels_df.empty:
                     rels_data_pbix = []
-                    for _, r in filtered_rels_df.iterrows():
+                    for _, r_item in filtered_rels_df.iterrows(): # Changed variable name to avoid conflict
                         rels_data_pbix.append({
-                            "From": f"{r.get('FromTableName','?')}.{r.get('FromColumnName','?')}",
-                            "To": f"{r.get('ToTableName','?')}.{r.get('ToColumnName','?')}",
-                            "Active": r.get("IsActive", True),
-                            "Cardinality": r.get("Cardinality", "N/A"),
-                            "Filter Dir.": r.get("CrossFilteringBehavior", "N/A")
+                            "From": f"{r_item.get('FromTableName','?')}.{r_item.get('FromColumnName','?')}",
+                            "To": f"{r_item.get('ToTableName','?')}.{r_item.get('ToColumnName','?')}",
+                            "Active": r_item.get("IsActive", True),
+                            "Cardinality": r_item.get("Cardinality", "N/A"),
+                            "Filter Dir.": r_item.get("CrossFilteringBehavior", "N/A")
                         })
                     df_rels_pbix = pd.DataFrame(rels_data_pbix)
                     st.sidebar.dataframe(df_rels_pbix, use_container_width=True, height=min(300, (len(df_rels_pbix) + 1) * 35 + 3))
@@ -395,7 +438,6 @@ if st.session_state.active_file_type:
             else: st.sidebar.info("No relationships found in PBIX.")
 
     elif st.session_state.explorer_option == "Report Structure":
-        # ... (This section using pbix_report_layout remains the same as in the previous response) ...
         st.sidebar.markdown("##### Report Structure (Pages & Visuals)")
         report_pages_data = None
         source_type_for_msg = ""
@@ -404,11 +446,11 @@ if st.session_state.active_file_type:
             report_pages_data = st.session_state.pbit_metadata.get("report_pages", [])
             source_type_for_msg = "PBIT"
         elif st.session_state.active_file_type == "pbix" and st.session_state.pbix_report_layout:
-            report_pages_data = st.session_state.pbix_report_layout 
+            report_pages_data = st.session_state.pbix_report_layout
             source_type_for_msg = "PBIX"
-        
+
         if report_pages_data:
-            all_pages = sorted(report_pages_data, key=lambda x: x.get("name", ""))
+            all_pages = sorted(report_pages_data, key=lambda x: x.get("name", "Unnamed Page"))
             filtered_pages = [
                 p for p in all_pages if not search_term_sb or
                 search_term_sb in p.get("name","").lower() or
@@ -432,11 +474,11 @@ if st.session_state.active_file_type:
             elif search_term_sb: st.sidebar.info(f"No report items match '{st.session_state.explorer_search_term}' in {source_type_for_msg}.")
         elif st.session_state.active_file_type == "pbix" and not st.session_state.pbix_report_layout:
             st.sidebar.info("Report structure (Report/Layout) was not found or parsed from this PBIX file.")
-        else: 
+        else:
             st.sidebar.info(f"No report structure information found in {source_type_for_msg}.")
 
 
-    elif st.session_state.explorer_option == "Table Data": # PBIX Only - Direct display in sidebar
+    elif st.session_state.explorer_option == "View Table Data (Sidebar)":
         if st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
             st.sidebar.markdown("##### View Table Data (PBIX)")
             pbix_obj_for_view = st.session_state.pbix_object
@@ -444,19 +486,17 @@ if st.session_state.active_file_type:
 
             if pbix_tables_for_view:
                 table_options = ["Select a table..."] + pbix_tables_for_view
-                
-                # Use a unique key for this selectbox if "sidebar_pbix_table_select" is used elsewhere or causes issues
                 selected_table_in_sb = st.sidebar.selectbox(
                     "Select table to view:",
                     options=table_options,
-                    key="sidebar_pbix_table_select_viewer" # Ensures this selectbox has its own state
+                    key="sidebar_pbix_table_select_viewer"
                 )
-
                 if selected_table_in_sb != "Select a table...":
                     try:
                         with st.spinner(f"Loading data for '{selected_table_in_sb}' in sidebar..."):
                             data_df_sb = pbix_obj_for_view.get_table(selected_table_in_sb)
-                            st.sidebar.dataframe(data_df_sb, height=300) # Display directly in sidebar
+                            st.sidebar.caption(f"Displaying preview of **{selected_table_in_sb}** ({len(data_df_sb)} rows):")
+                            st.sidebar.dataframe(data_df_sb, height=300)
                     except Exception as e_sb_table:
                         st.sidebar.error(f"Could not load data for '{selected_table_in_sb}': {e_sb_table}")
             else:
@@ -466,25 +506,29 @@ if st.session_state.active_file_type:
 
 
 # --- Main Page: Chatbot Interface ---
-st.header("📊 PBIT/PBIX Chatbot & Explorer")
+st.header("📊 PBIXpert Chatbot & Explorer")
 
 if not st.session_state.active_file_type:
-    st.info("👈 Upload a .pbit or .pbix file using the sidebar to analyze and chat about its metadata.")
-else:
+    st.info("👈 Upload a .pbit or .pbix file and configure Gemini API Key in the sidebar to begin.")
+elif not st.session_state.gemini_configured:
+    st.info("👈 Please configure your Gemini API Key in the sidebar to enable the PBIXpert chatbot.")
+else: # File is loaded AND Gemini is configured
     display_filename = st.session_state.get("original_uploaded_file_name", "N/A")
     file_type_display = st.session_state.active_file_type.upper() if st.session_state.active_file_type else ""
-    st.caption(f"Currently analyzing {file_type_display}: **{display_filename}**")
+    st.caption(f"Currently analyzing {file_type_display}: **{display_filename}** with PBIXpert (Gemini).")
 
+    # Chat history display
     chat_box_style = (
-        "max-height: 500px; overflow-y: auto; padding: 10px; "
+        "max-height: 600px; overflow-y: auto; padding: 10px; "
         "border-radius: 5px; margin-bottom: 10px;"
     )
     st.markdown(f'<div id="chat-messages-container" style="{chat_box_style}">', unsafe_allow_html=True)
     for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            st.markdown(message["content"]) # Gemini output is Markdown
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # Auto-scroll JS
     js_key_for_html_component = f"auto_scroll_js_{st.session_state.run_id}"
     js_autoscroll = f"""
     <script name="{js_key_for_html_component}">
@@ -497,41 +541,31 @@ else:
     if st.session_state.chat_history:
         st.components.v1.html(js_autoscroll, height=0, scrolling=False)
 
-    if prompt := st.chat_input("Ask about the PBIT/PBIX metadata..."):
+    # Chat input
+    if prompt := st.chat_input("Ask PBIXpert about the file or data concepts..."):
         st.session_state.chat_history.append({"role": "user", "content": prompt})
-        response = "Could not process query: No active file or unknown file type."
-        with st.spinner("Thinking..."):
-            if st.session_state.active_file_type == "pbit" and st.session_state.pbit_metadata:
-                response = process_query(prompt, st.session_state.pbit_metadata, "pbit", None)
-            elif st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
-                response = process_query(prompt, st.session_state.pbix_object, "pbix", st.session_state.pbix_report_layout)
-
-        # The "DATA_VIEW_REQUEST" can still be used by the chatbot for main area display if needed for larger views
-        if isinstance(response, str) and response.startswith("DATA_VIEW_REQUEST:"):
-            table_to_view_main = response.split(":", 1)[1]
-            st.session_state.chat_history.append({"role": "assistant", "content": f"To view detailed data for table **{table_to_view_main}**, I can display it below. (For a quick look, use the 'Table Data' explorer option). Displaying now..."})
-            # This will trigger the main area display block below if uncommented
-            # st.session_state.view_data_table_name_main_area = table_to_view_main
+        response_text = "Error: Could not determine how to process query."
+        with st.spinner("PBIXpert is thinking..."):
+            current_file_data = None
+            if st.session_state.active_file_type == "pbit":
+                current_file_data = st.session_state.pbit_metadata
+            elif st.session_state.active_file_type == "pbix":
+                current_file_data = st.session_state.pbix_object
             
-            # For now, let's assume chatbot requests for table data are just informational
-            # and point to the sidebar, or we add a separate state for main area display if explicitly requested
-            st.session_state.chat_history.append({"role": "assistant", "content": f"You can view table data using the 'Table Data' option in the explorer for a quick look at PBIX table contents."})
+            if current_file_data and st.session_state.original_uploaded_file_name:
+                response_text = process_query_with_gemini(
+                    user_query=prompt,
+                    primary_metadata=current_file_data,
+                    file_type=st.session_state.active_file_type,
+                    original_file_name=st.session_state.original_uploaded_file_name,
+                    pbix_report_layout=st.session_state.pbix_report_layout if st.session_state.active_file_type == "pbix" else None
+                )
+            else:
+                response_text = "It seems no file is loaded or an internal error occurred. Please try re-uploading."
 
-        else:
-            st.session_state.chat_history.append({"role": "assistant", "content": response})
+        st.session_state.chat_history.append({"role": "assistant", "content": response_text})
         st.session_state.run_id += 1
         st.rerun()
 
-    # Optional: Main area display for table data if triggered by chatbot in the future
-    # if st.session_state.get("view_data_table_name_main_area") and \
-    #    st.session_state.active_file_type == "pbix" and st.session_state.pbix_object:
-    #     table_name_main = st.session_state.view_data_table_name_main_area
-    #     with st.container():
-    #         st.markdown("---")
-    #         st.subheader(f"Data for Table (Main View): {table_name_main}")
-    #         # ... (load and display logic for main area) ...
-    #     st.session_state.view_data_table_name_main_area = None
-
-
 st.sidebar.markdown("---")
-st.sidebar.caption("PBIT/PBIX Analyzer - Developed by Marvin Heng")
+st.sidebar.caption("PBIXpert Analyzer - Powered by Gemini")
