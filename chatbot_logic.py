@@ -1,5 +1,44 @@
 from typing import Dict, Any, List, Optional
+import pandas as pd # For PBIX DataFrames
 
+# --- PBIT Specific Helper Functions (from original code, largely unchanged) ---
+def get_all_table_names_pbit(metadata: Dict[str, Any]) -> List[str]:
+    return [table['name'] for table in metadata.get('tables', []) if table.get('name')]
+
+def get_all_measure_names_qualified_pbit(metadata: Dict[str, Any]) -> List[str]:
+    return list(metadata.get('measures', {}).keys())
+
+def get_all_cc_names_qualified_pbit(metadata: Dict[str, Any]) -> List[str]:
+    return list(metadata.get('calculated_columns', {}).keys())
+
+def get_simple_names_from_qualified(qualified_names: List[str]) -> List[str]:
+    return list(set(name.split('.')[-1] for name in qualified_names if name and '.' in name))
+
+def get_global_measure_names(qualified_names: List[str]) -> List[str]:
+    return list(set(name for name in qualified_names if name and '.' not in name))
+
+def get_all_column_names_from_tables_qualified_pbit(metadata: Dict[str, Any]) -> List[str]:
+    qualified_cols = []
+    for table in metadata.get('tables', []):
+        table_name = table.get('name')
+        if table_name:
+            for col in table.get('columns', []):
+                col_name = col.get('name')
+                if col_name: qualified_cols.append(f"{table_name}.{col_name}")
+    return list(set(qualified_cols))
+
+def get_all_page_names_pbit(metadata: Dict[str, Any]) -> List[str]: # For PBIT or PBIX report_layout_data
+    if isinstance(metadata, dict): # PBIT style
+        return [page['name'] for page in metadata.get('report_pages', []) if page.get('name')]
+    elif isinstance(metadata, list): # PBIX report_layout_data style (list of page dicts)
+        return [page['name'] for page in metadata if isinstance(page, dict) and page.get('name')]
+    return []
+
+
+def get_tables_with_m_queries_pbit(metadata: Dict[str, Any]) -> List[str]:
+    return list(set(mq.get("table_name") for mq in metadata.get("m_queries", []) if mq.get("table_name")))
+
+# --- Generic Helper Functions ---
 def find_entity(text: str, entities: List[str]) -> Optional[str]:
     text_lower = text.lower()
     sorted_entities = sorted(entities, key=len, reverse=True)
@@ -15,185 +54,346 @@ def find_entities_in_query(text: str, entity_list: List[str]) -> List[str]:
         entity_lower = entity_name.lower()
         if entity_lower in temp_text_lower:
             found_entities.append(entity_name)
-            temp_text_lower = temp_text_lower.replace(entity_lower, "###FOUND###", 1) 
+            temp_text_lower = temp_text_lower.replace(entity_lower, "###FOUND###", 1)
     return list(set(found_entities))
 
-def get_all_table_names(metadata: Dict[str, Any]) -> List[str]:
-    return [table['name'] for table in metadata.get('tables', []) if table.get('name')]
 
-def get_all_measure_names_qualified(metadata: Dict[str, Any]) -> List[str]:
-    return list(metadata.get('measures', {}).keys())
-
-def get_all_cc_names_qualified(metadata: Dict[str, Any]) -> List[str]:
-    return list(metadata.get('calculated_columns', {}).keys())
-
-def get_simple_names_from_qualified(qualified_names: List[str]) -> List[str]:
-    return list(set(name.split('.')[-1] for name in qualified_names if name and '.' in name))
-
-def get_global_measure_names(qualified_names: List[str]) -> List[str]:
-    return list(set(name for name in qualified_names if name and '.' not in name))
-
-def get_all_column_names_from_tables_qualified(metadata: Dict[str, Any]) -> List[str]:
-    qualified_cols = []
-    for table in metadata.get('tables', []):
-        table_name = table.get('name')
-        if table_name:
-            for col in table.get('columns', []):
-                col_name = col.get('name')
-                if col_name: qualified_cols.append(f"{table_name}.{col_name}")
-    return list(set(qualified_cols))
-
-def get_all_page_names(metadata: Dict[str, Any]) -> List[str]:
-    return [page['name'] for page in metadata.get('report_pages', []) if page.get('name')]
-
-def get_tables_with_m_queries(metadata: Dict[str, Any]) -> List[str]:
-    return list(set(mq.get("table_name") for mq in metadata.get("m_queries", []) if mq.get("table_name")))
-
-def process_query(query: str, metadata: Dict[str, Any]) -> str:
+# --- Main Query Processing Function ---
+def process_query(query: str, primary_metadata: Any, file_type: str, auxiliary_data: Optional[Any] = None) -> str:
     query_lower = query.lower()
-    table_names = get_all_table_names(metadata)
-    tables_with_m = get_tables_with_m_queries(metadata)
-    qualified_measure_names = get_all_measure_names_qualified(metadata)
-    simple_measure_names_from_qualified = get_simple_names_from_qualified(qualified_measure_names)
-    global_measure_names = get_global_measure_names(qualified_measure_names)
-    all_simple_measure_names_for_search = list(set(simple_measure_names_from_qualified + global_measure_names))
-    qualified_cc_names = get_all_cc_names_qualified(metadata)
-    simple_cc_names = get_simple_names_from_qualified(qualified_cc_names)
-    qualified_table_column_names = get_all_column_names_from_tables_qualified(metadata)
-    simple_table_column_names = get_simple_names_from_qualified(qualified_table_column_names)
-    all_known_qualified_fields = list(set(qualified_measure_names + qualified_cc_names + qualified_table_column_names))
-    all_known_simple_fields = list(set(all_simple_measure_names_for_search + simple_cc_names + simple_table_column_names))
-    page_names = get_all_page_names(metadata)
 
-    # M Query Intents
-    if "list m queries" in query_lower or "show m queries" in query_lower or "which tables have m queries" in query_lower:
-        if tables_with_m: return "Tables with M (Power Query) scripts:\n" + "\n".join([f"- {name}" for name in sorted(tables_with_m)])
-        return "No M (Power Query) scripts were found."
-    if "m query for table" in query_lower or "show m script for" in query_lower or "power query for" in query_lower or "get m for" in query_lower:
-        table_name_match_m = find_entity(query, tables_with_m)
-        if table_name_match_m:
-            for mq in metadata.get("m_queries", []):
-                if mq.get("table_name", "").lower() == table_name_match_m.lower():
-                    analysis = mq.get("analysis", {})
-                    sources = analysis.get("sources", [])
-                    transforms = analysis.get("transformations", [])
-                    resp = f"M Query for table '{table_name_match_m}':\n"
-                    resp += f"  Identified Sources: {', '.join(sources) if sources else 'None identified'}\n"
-                    resp += f"  Common Transformations: {', '.join(transforms) if transforms else 'None identified'}\n\n"
-                    resp += "```m\n" + mq.get("script", "Error: Script not found.") + "\n```"
-                    return resp
-            return f"M Query info for '{table_name_match_m}' not found despite expectation."
-        general_table_match = find_entity(query, table_names)
-        if general_table_match: return f"Table '{general_table_match}' found, but no M script associated in parsed data."
-        return "Which table's M script? Ex: 'm query for table SalesData'"
+    if file_type == "pbit" and primary_metadata:
+        pbit_m = primary_metadata
+        table_names = get_all_table_names_pbit(pbit_m)
+        tables_with_m = get_tables_with_m_queries_pbit(pbit_m)
+        qualified_measure_names = get_all_measure_names_qualified_pbit(pbit_m)
+        simple_measure_names_from_qualified = get_simple_names_from_qualified(qualified_measure_names)
+        global_measure_names = get_global_measure_names(qualified_measure_names)
+        all_simple_measure_names_for_search = list(set(simple_measure_names_from_qualified + global_measure_names))
+        
+        qualified_cc_names_pbit = get_all_cc_names_qualified_pbit(pbit_m) # Use specific name
+        simple_cc_names_pbit = get_simple_names_from_qualified(qualified_cc_names_pbit)
 
-    # Existing Intents
-    if "list tables" in query_lower:
-        if table_names: return "Tables:\n" + "\n".join([f"- {name}" for name in table_names]); return "No tables."
-    if "describe table" in query_lower or "what columns in" in query_lower:
-        tbl_match = find_entity(query, table_names)
-        if tbl_match:
-            for t in metadata.get("tables",[]): 
-                if t.get("name","").lower()==tbl_match.lower(): 
-                    cols = [f"- {c.get('name','?')}({c.get('dataType','?')})" for c in t.get("columns",[])]; 
-                    return f"Cols in '{tbl_match}':\n"+"\n".join(cols) if cols else f"No cols in '{tbl_match}'."
-            return f"Table '{tbl_match}' not found."
-        return "Which table to describe?"
-    if "list measures" in query_lower:
-        if qualified_measure_names: return "Measures:\n" + "\n".join([f"- {name}" for name in qualified_measure_names]); return "No measures."
-    if "formula for measure" in query_lower or "show dax for" in query_lower:
-        target_m_key = find_entity(query, qualified_measure_names)
-        if not target_m_key:
-            s_m_match = find_entity(query, all_simple_measure_names_for_search)
-            if s_m_match:
-                p_keys = [k for k in qualified_measure_names if k.lower().endswith(f".{s_m_match.lower()}") or k.lower() == s_m_match.lower()]
-                if len(p_keys) == 1: target_m_key = p_keys[0]
-                elif len(p_keys) > 1: return f"Ambiguous measure '{s_m_match}'. Options: {', '.join(p_keys)}"
-        if target_m_key and target_m_key in metadata.get("measures",{}): return f"DAX for '{target_m_key}':\n{metadata['measures'][target_m_key]}"
-        if find_entity(query, all_simple_measure_names_for_search + qualified_measure_names): return "Measure not found."
-        return "Which measure for formula?"
-    if "list calculated columns" in query_lower:
-        if qualified_cc_names: return "Calc Cols:\n" + "\n".join([f"- {n}: {metadata['calculated_columns'][n]}" for n in qualified_cc_names]); return "No calc cols."
-    if "formula for calculated column" in query_lower or "dax for column" in query_lower:
-        target_cc_key = find_entity(query, qualified_cc_names)
-        if not target_cc_key:
-            s_cc_match = find_entity(query, simple_cc_names)
-            if s_cc_match:
-                p_keys = [k for k in qualified_cc_names if k.lower().endswith(f".{s_cc_match.lower()}")]
-                if len(p_keys) == 1: target_cc_key = p_keys[0]
-                elif len(p_keys) > 1: return f"Ambiguous calc col '{s_cc_match}'. Options: {', '.join(p_keys)}"
-        if target_cc_key and target_cc_key in metadata.get("calculated_columns",{}): return f"DAX for calc col '{target_cc_key}':\n{metadata['calculated_columns'][target_cc_key]}"
-        if find_entity(query, simple_cc_names + qualified_cc_names): return "Calc col not found."
-        return "Which calc col for formula?"
-    if "list relationships" in query_lower or "show relationships" in query_lower or "relationships of" in query_lower or "relationships for table" in query_lower:
-        all_rels = metadata.get("relationships", [])
-        if not all_rels: return "No relationships found."
-        tbl_match_rel = find_entity(query, table_names); rel_rels = []; hdr = "Relationships"
-        if tbl_match_rel:
-            hdr = f"Relationships for '{tbl_match_rel}'"
-            for r in all_rels:
-                if (r.get('fromTable','').lower() == tbl_match_rel.lower() or r.get('toTable','').lower() == tbl_match_rel.lower()): rel_rels.append(r)
-            if not rel_rels: return f"No relationships for '{tbl_match_rel}'."
-        else:
-            if "relationships of" in query_lower or "relationships for table" in query_lower:
-                 if not find_entities_in_query(query, table_names): return "Which table for relationships?"
-            rel_rels = all_rels
-        rels_txt = [f"- From '{r.get('fromTable','?')}.{r.get('fromColumn','?')}' To '{r.get('toTable','?')}.{r.get('toColumn','?')}' (Active: {r.get('isActive', '?')}, Filter: {r.get('crossFilteringBehavior', '?')})" for r in rel_rels]
-        return f"{hdr}:\n" + "\n".join(rels_txt)
-    if "list pages" in query_lower:
-        if page_names: return "Pages:\n" + "\n".join([f"- {n}" for n in page_names]); return "No pages."
-    if "visuals on page" in query_lower or "what visuals are on" in query_lower:
-        pg_match = find_entity(query, page_names)
-        if pg_match:
-            for p in metadata.get("report_pages",[]):
-                if p.get("name","").lower() == pg_match.lower():
-                    vs = p.get("visuals",[])
-                    if vs: v_info = [f"  - Type: {v.get('type','?')}, Title: {v.get('title','N/A')}, Fields: {', '.join(v.get('fields_used',[])) if v.get('fields_used') else 'N/A'}" for v in vs]; return f"Visuals on '{pg_match}':\n" + "\n".join(v_info)
-                    return f"No visuals on '{pg_match}'."
-            return f"Page '{pg_match}' not found."
-        return "Which page for visuals?"
-    if "where is column" in query_lower or "where is measure" in query_lower or "visuals use field" in query_lower or "which visuals use" in query_lower:
-        s_f_q = find_entity(query, all_known_qualified_fields); s_f_s = None
-        if not s_f_q: s_f_s = find_entity(query, all_known_simple_fields)
-        f_t_s_f_l = None; s_t_d = None
-        if s_f_q: f_t_s_f_l = s_f_q.lower(); s_t_d = s_f_q
-        elif s_f_s:
-            p_q_m = [qf for qf in all_known_qualified_fields if qf.lower().endswith(f".{s_f_s.lower()}") or qf.lower() == s_f_s.lower()]
-            if len(p_q_m) == 1: f_t_s_f_l = p_q_m[0].lower(); s_t_d = p_q_m[0]
-            elif len(p_q_m) > 1: return f"Ambiguous field '{s_f_s}'. Options: {', '.join(p_q_m)}"
-            else: f_t_s_f_l = s_f_s.lower(); s_t_d = s_f_s
-        if not f_t_s_f_l: return "Which field for usage?"
-        res = []
-        for p in metadata.get("report_pages", []):
-            for v in p.get("visuals", []):
-                for f_i_v_p in v.get("fields_used", []):
-                    f_i_v_l = f_i_v_p.lower()
-                    if f_t_s_f_l == f_i_v_l or (not '.' in f_t_s_f_l and f_i_v_l.endswith(f".{f_t_s_f_l}")) or ('.' in f_t_s_f_l and f_i_v_l == f_t_s_f_l.split('.')[-1]):
-                        v_id = f"'{v.get('title', v.get('type', '?'))}' on page '{p.get('name','?')}'"; f_txt = f"- Field '{s_t_d}' (as '{f_i_v_p}') in visual {v_id}."
-                        if f_txt not in res: res.append(f_txt)
-        if res: return f"Usage of '{s_t_d}':\n" + "\n".join(res)
-        return f"Field '{s_t_d}' not found in visuals."
+        page_names_pbit = get_all_page_names_pbit(pbit_m) # Use specific name
 
-    # Fallback
-    return ("Sorry, I didn't understand that. Try asking things like:\n"
-            "- List tables / Describe table 'X'\n"
-            "- List measures / Formula for measure 'Y'\n"
-            "- List calculated columns\n"
-            "- List relationships / List relationships for table 'X'\n"
-            "- List M Queries / M Query for table 'X'\n"
-            "- List pages / Visuals on page 'P'\n"
-            "- Where is column 'T.C' used / Which visuals use measure 'M'")
+        # --- PBIT Specific Intent Handling (Calculated Columns and Report Structure added/checked) ---
+        if "list calculated columns" in query_lower:
+            if qualified_cc_names_pbit: return "Calculated Columns (PBIT):\n" + "\n".join([f"- {n}" for n in sorted(qualified_cc_names_pbit)])
+            return "No calculated columns found in PBIT."
+
+        if "formula for calculated column" in query_lower or "dax for column" in query_lower : # ensure 'column' to distinguish from measure
+            target_cc_key = find_entity(query, qualified_cc_names_pbit)
+            if not target_cc_key:
+                s_cc_match = find_entity(query, simple_cc_names_pbit)
+                if s_cc_match: # Try to find a qualified match
+                    p_keys = [k for k in qualified_cc_names_pbit if k.lower().endswith(f".{s_cc_match.lower()}")]
+                    if len(p_keys) == 1: target_cc_key = p_keys[0]
+                    elif len(p_keys) > 1: return f"Ambiguous calculated column '{s_cc_match}'. Options: {', '.join(p_keys)}"
+            if target_cc_key and target_cc_key in pbit_m.get("calculated_columns",{}):
+                return f"DAX for PBIT calculated column '{target_cc_key}':\n```dax\n{pbit_m['calculated_columns'][target_cc_key]}\n```"
+            # Check if any part of the query matches a known cc name, even if full resolution failed
+            if find_entity(query, simple_cc_names_pbit + qualified_cc_names_pbit): return "PBIT Calculated column name found, but formula couldn't be retrieved or was ambiguous."
+            return "Which PBIT calculated column for formula? (e.g., 'Table.Column')"
+
+        if "list pages" in query_lower:
+            if page_names_pbit: return "Pages (PBIT):\n" + "\n".join([f"- {n}" for n in page_names_pbit])
+            return "No pages found in PBIT."
+
+        if "visuals on page" in query_lower or "what visuals are on" in query_lower:
+            pg_match = find_entity(query, page_names_pbit)
+            if pg_match:
+                for p in pbit_m.get("report_pages",[]): # PBIT specific structure
+                    if p.get("name","").lower() == pg_match.lower():
+                        vs = p.get("visuals",[])
+                        if vs:
+                            v_info = [f"  - Type: {v.get('type','?')}, Title: {v.get('title','N/A')}, Fields: {', '.join(v.get('fields_used',[])) if v.get('fields_used') else 'N/A'}" for v in vs]
+                            return f"Visuals on PBIT page '{pg_match}':\n" + "\n".join(v_info)
+                        return f"No visuals on PBIT page '{pg_match}'."
+                return f"PBIT Page '{pg_match}' not found."
+            return "Which PBIT page for visuals?"
+        # ... (Other PBIT intents: tables, measures, m-queries, relationships, where is field used) ...
+        # (These were mostly covered in the previous response and can be re-inserted here if needed,
+        # ensuring they use pbit_m and PBIT-specific helpers)
+        if "list m queries" in query_lower or "show m queries" in query_lower or "which tables have m queries" in query_lower:
+            if tables_with_m: return "Tables with M (Power Query) scripts (PBIT):\n" + "\n".join([f"- {name}" for name in sorted(tables_with_m)])
+            return "No M (Power Query) scripts were found in PBIT."
+        if "m query for table" in query_lower or "show m script for" in query_lower or "power query for" in query_lower or "get m for" in query_lower:
+            table_name_match_m = find_entity(query, tables_with_m)
+            if table_name_match_m:
+                for mq in pbit_m.get("m_queries", []):
+                    if mq.get("table_name", "").lower() == table_name_match_m.lower():
+                        analysis = mq.get("analysis", {})
+                        sources = analysis.get("sources", [])
+                        transforms = analysis.get("transformations", [])
+                        resp = f"M Query for table '{table_name_match_m}' (PBIT):\n"
+                        resp += f"  Identified Sources: {', '.join(sources) if sources else 'None identified'}\n"
+                        resp += f"  Common Transformations: {', '.join(transforms) if transforms else 'None identified'}\n\n"
+                        resp += "```m\n" + mq.get("script", "Error: Script not found.") + "\n```"
+                        return resp
+                return f"M Query info for '{table_name_match_m}' not found despite expectation (PBIT)."
+            general_table_match = find_entity(query, table_names)
+            if general_table_match: return f"Table '{general_table_match}' found, but no M script associated in parsed PBIT data."
+            return "Which table's M script? Ex: 'm query for table SalesData'"
+
+        if "list tables" in query_lower:
+            if table_names: return "Tables (PBIT):\n" + "\n".join([f"- {name}" for name in table_names])
+            return "No tables found in PBIT."
+        if "describe table" in query_lower or "what columns in" in query_lower:
+            tbl_match = find_entity(query, table_names)
+            if tbl_match:
+                for t in pbit_m.get("tables",[]):
+                    if t.get("name","").lower()==tbl_match.lower():
+                        cols = [f"- {c.get('name','?')}({c.get('dataType','?')})" for c in t.get("columns",[])];
+                        return f"Columns in PBIT table '{tbl_match}':\n"+"\n".join(cols) if cols else f"No columns in PBIT table '{tbl_match}'."
+                return f"Table '{tbl_match}' not found in PBIT."
+            return "Which PBIT table to describe?"
+        if "list measures" in query_lower:
+            if qualified_measure_names: return "Measures (PBIT):\n" + "\n".join([f"- {name}" for name in qualified_measure_names]); return "No measures in PBIT."
+        if "formula for measure" in query_lower or "show dax for" in query_lower: # Added check to avoid collision with "dax for column"
+            if "column" in query_lower: # Defer to calculated column logic if "column" is present
+                 pass # Let it fall through or be handled by calc column logic
+            else:
+                target_m_key = find_entity(query, qualified_measure_names)
+                if not target_m_key:
+                    s_m_match = find_entity(query, all_simple_measure_names_for_search)
+                    if s_m_match:
+                        p_keys = [k for k in qualified_measure_names if k.lower().endswith(f".{s_m_match.lower()}") or k.lower() == s_m_match.lower()]
+                        if len(p_keys) == 1: target_m_key = p_keys[0]
+                        elif len(p_keys) > 1: return f"Ambiguous measure '{s_m_match}'. Options: {', '.join(p_keys)}"
+                if target_m_key and target_m_key in pbit_m.get("measures",{}): return f"DAX for PBIT measure '{target_m_key}':\n{pbit_m['measures'][target_m_key]}"
+                if find_entity(query, all_simple_measure_names_for_search + qualified_measure_names): return "PBIT Measure not found."
+                return "Which PBIT measure for formula?"
+
+        if "list relationships" in query_lower or "show relationships" in query_lower or "relationships of" in query_lower or "relationships for table" in query_lower:
+            all_rels = pbit_m.get("relationships", [])
+            if not all_rels: return "No relationships found in PBIT."
+            tbl_match_rel = find_entity(query, table_names); rel_rels = []; hdr = "Relationships (PBIT)"
+            if tbl_match_rel:
+                hdr = f"Relationships for PBIT table '{tbl_match_rel}'"
+                for r in all_rels:
+                    if (r.get('fromTable','').lower() == tbl_match_rel.lower() or r.get('toTable','').lower() == tbl_match_rel.lower()): rel_rels.append(r)
+                if not rel_rels: return f"No relationships for PBIT table '{tbl_match_rel}'."
+            else:
+                if "relationships of" in query_lower or "relationships for table" in query_lower:
+                     if not find_entities_in_query(query, table_names): return "Which PBIT table for relationships?"
+                rel_rels = all_rels
+            rels_txt = [f"- From '{r.get('fromTable','?')}.{r.get('fromColumn','?')}' To '{r.get('toTable','?')}.{r.get('toColumn','?')}' (Active: {r.get('isActive', '?')}, Filter: {r.get('crossFilteringBehavior', '?')})" for r in rel_rels]
+            return f"{hdr}:\n" + "\n".join(rels_txt)
+
+
+    elif file_type == "pbix" and primary_metadata:
+        pbix = primary_metadata # PBIXRay object
+        pbix_report_layout = auxiliary_data # List of page dicts, or None
+
+        pbix_table_names = sorted(list(pbix.tables))
+        pbix_measures_df = pbix.dax_measures_df
+        pbix_relationships_df = pbix.relationships
+        pbix_power_query_df = pbix.power_query
+        pbix_schema_df = pbix.schema
+        pbix_cc_df = pbix.dax_columns_df # DataFrame: TableName, ColumnName, Expression
+
+        pbix_page_names = []
+        if pbix_report_layout:
+            pbix_page_names = get_all_page_names_pbit(pbix_report_layout) # Reusing helper
+
+        # --- PBIX Specific Intent Handling ---
+        if "list calculated columns" in query_lower:
+            if not pbix_cc_df.empty:
+                cc_list = [f"- {row['TableName']}.{row['ColumnName']}" for _, row in pbix_cc_df.iterrows()]
+                return "Calculated Columns (PBIX):\n" + "\n".join(sorted(cc_list))
+            return "No calculated columns found in PBIX."
+
+        if "formula for calculated column" in query_lower or "dax for column" in query_lower:
+            # Attempt to extract column name (this is simplified)
+            # e.g., "formula for calculated column 'Sales'[Profit]" or "dax for column Sales.Profit"
+            potential_cc_str = query_lower.split("column")[-1].strip().replace("'", "").replace("[", ".").replace("]", "")
+            found_cc = []
+            for _, row in pbix_cc_df.iterrows():
+                full_cc_name = f"{row['TableName']}.{row['ColumnName']}"
+                if potential_cc_str == full_cc_name.lower() or potential_cc_str == row['ColumnName'].lower():
+                    found_cc.append(f"DAX for PBIX calculated column '{full_cc_name}':\n```dax\n{row['Expression']}\n```")
+            if found_cc: return "\n\n".join(found_cc)
+            return f"Calculated column like '{potential_cc_str}' not found or ambiguous in PBIX."
+
+        if "list pages" in query_lower:
+            if pbix_page_names: return "Pages (PBIX Report Layout):\n" + "\n".join([f"- {n}" for n in pbix_page_names])
+            if pbix_report_layout is None: return "PBIX Report layout was not parsed. Cannot list pages."
+            return "No pages found in PBIX report layout."
+
+        if "visuals on page" in query_lower or "what visuals are on" in query_lower:
+            if not pbix_report_layout:
+                return "PBIX Report layout was not parsed. Cannot get visuals."
+            pg_match = find_entity(query, pbix_page_names)
+            if pg_match:
+                for p in pbix_report_layout: # PBIX specific structure (list of dicts)
+                    if p.get("name","").lower() == pg_match.lower():
+                        vs = p.get("visuals",[])
+                        if vs:
+                            v_info = [f"  - Type: {v.get('type','?')}, Title: {v.get('title','N/A')}, Fields: {', '.join(v.get('fields_used',[])) if v.get('fields_used') else 'N/A'}" for v in vs]
+                            return f"Visuals on PBIX page '{pg_match}':\n" + "\n".join(v_info)
+                        return f"No visuals on PBIX page '{pg_match}'."
+                return f"PBIX Page '{pg_match}' not found in report layout."
+            return "Which PBIX page for visuals? (from report layout)"
+
+        # ... (Other PBIX intents from previous response: tables, measures, m-queries, relationships, show data) ...
+        if "list tables" in query_lower:
+            if pbix_table_names:
+                return "Tables in PBIX:\n" + "\n".join([f"- {name}" for name in pbix_table_names])
+            return "No tables found in PBIX."
+
+        if "describe table" in query_lower or "what columns in" in query_lower:
+            # query_lower.replace("describe table", "").replace("what columns in", "").strip()
+            # A bit more robust: find table name after "table" or "in"
+            search_query_for_table = query_lower
+            if "describe table" in query_lower: search_query_for_table = query_lower.split("describe table",1)[-1]
+            elif "what columns in" in query_lower: search_query_for_table = query_lower.split("what columns in",1)[-1]
+
+            matched_table = find_entity(search_query_for_table.strip(), pbix_table_names)
+            if matched_table:
+                table_cols_df = pbix_schema_df[pbix_schema_df['TableName'] == matched_table]
+                if not table_cols_df.empty:
+                    cols_info = [f"- {row['ColumnName']} ({row['PandasDataType']})" for _, row in table_cols_df.iterrows()]
+                    return f"Columns in PBIX table '{matched_table}':\n" + "\n".join(cols_info)
+                return f"No columns found for PBIX table '{matched_table}'."
+            return "Which PBIX table to describe? Available: " + ", ".join(pbix_table_names) if pbix_table_names else "No tables found."
+
+        if "list measures" in query_lower:
+            if not pbix_measures_df.empty:
+                measures_list = [f"- {row['TableName']}.{row['Name']}" for _, row in pbix_measures_df.iterrows()]
+                return "DAX Measures in PBIX:\n" + "\n".join(sorted(measures_list))
+            return "No DAX measures found in PBIX."
+
+        if ("formula for measure" in query_lower or "show dax for measure" in query_lower) and "column" not in query_lower :
+            potential_measure_str = query_lower.split("measure")[-1].strip().replace("'", "")
+            found_m = []
+            for _, row in pbix_measures_df.iterrows():
+                full_measure_name = f"{row['TableName']}.{row['Name']}"
+                simple_measure_name = row['Name']
+                if potential_measure_str == full_measure_name.lower() or potential_measure_str == simple_measure_name.lower():
+                    found_m.append(f"DAX for PBIX measure '{full_measure_name}':\n```dax\n{row['Expression']}\n```")
+            if found_m: return "\n\n".join(found_m)
+            return f"Measure like '{potential_measure_str}' not found or ambiguous in PBIX."
+
+        if "list relationships" in query_lower or "show relationships" in query_lower:
+            if not pbix_relationships_df.empty:
+                rels_text = []
+                for _, row in pbix_relationships_df.iterrows():
+                    rels_text.append(f"- From '{row['FromTableName']}.{row['FromColumnName']}' To '{row['ToTableName']}.{row['ToColumnName']}' (Active: {row['IsActive']}, Card: {row['Cardinality']}, Filter: {row['CrossFilteringBehavior']})")
+                return "Relationships in PBIX:\n" + "\n".join(rels_text)
+            return "No relationships found in PBIX."
+
+        if "list m queries" in query_lower or "show m queries" in query_lower :
+            if not pbix_power_query_df.empty:
+                m_queries_tables = sorted(list(pbix_power_query_df['TableName'].unique()))
+                return "Tables with M Queries in PBIX:\n" + "\n".join([f"- {name}" for name in m_queries_tables])
+            return "No M Queries found in PBIX."
+
+        if "m query for table" in query_lower or "show m script for" in query_lower:
+            potential_table_name = query_lower.split("table")[-1].strip().replace("'", "")
+            m_query_table_names = list(pbix_power_query_df['TableName'].unique())
+            matched_table = find_entity(potential_table_name, m_query_table_names)
+            if matched_table:
+                expression = pbix_power_query_df[pbix_power_query_df['TableName'] == matched_table]['Expression'].iloc[0]
+                return f"M Query for PBIX table '{matched_table}':\n```m\n{expression}\n```"
+            return f"Table '{potential_table_name}' not found with an M query in PBIX."
+
+        if "show data for table" in query_lower or "get data for table" in query_lower:
+            parts = query_lower.split("table")
+            if len(parts) > 1:
+                potential_table_name = parts[-1].strip().replace("'", "")
+                actual_table_name = find_entity(potential_table_name, pbix_table_names)
+                if actual_table_name:
+                    return f"DATA_VIEW_REQUEST:{actual_table_name}"
+                else:
+                    return f"Table '{potential_table_name}' not found in PBIX. Available tables: {', '.join(pbix_table_names) if pbix_table_names else 'None'}."
+            return "Please specify which table's data you want to see, e.g., 'show data for table Sales'."
+
+
+    # Fallback message
+    fallback_message = "Sorry, I didn't understand that. Try asking things like:\n"
+    if file_type == "pbit":
+        fallback_message += ("- List tables\n"
+                             "- Describe table 'X'\n"
+                             "- List measures / Formula for measure 'Y'\n"
+                             "- List calculated columns / Formula for calculated column 'T.C'\n"
+                             "- List M Queries / M Query for table 'X'\n"
+                             "- List pages / Visuals on page 'P'")
+    elif file_type == "pbix":
+        fallback_message += ("- List tables\n"
+                             "- Describe table 'X'\n"
+                             "- Show data for table 'Y'\n"
+                             "- List measures / Formula for measure 'Y'\n"
+                             "- List calculated columns / Formula for calculated column 'T.C'\n"
+                             "- List M Queries / M Query for table 'X'\n")
+        if auxiliary_data: # If pbix_report_layout was passed
+            fallback_message += "- List pages / Visuals on page 'P' (from report layout)\n"
+    else:
+        fallback_message = "No file is currently loaded or the file type is not supported for detailed queries. Please upload a .pbit or .pbix file."
+
+    return fallback_message
+
 
 if __name__ == '__main__':
-    dummy_metadata = {
-        "tables": [{"name": "SalesData"}, {"name": "ProductInfo"}, {"name": "WebSourceTable"}],
-        "m_queries": [
-            {"table_name": "SalesData", "script": "let Src=Excel.Workbook(\"s.xlsx\") in Src", "analysis": {"sources": ["Excel"], "transformations": []}},
-            {"table_name": "ProductInfo", "script": "let Src=Sql.Database(\"srv\",\"db\") in Src", "analysis": {"sources": ["SQL"], "transformations": []}}
-        ], "measures": {"SalesData.TotalAmount": "SUM(SalesData[Amount])"}, "relationships": [],
-        "report_pages": [], "calculated_columns": {}, "file_name": "dummy.pbit"
+    # Dummy PBIT metadata for testing PBIT path
+    dummy_pbit_metadata = {
+        "tables": [{"name": "SalesData", "columns": [{"name": "Amount", "dataType": "decimal"}]}, {"name": "ProductInfo"}],
+        "m_queries": [{"table_name": "SalesData", "script": "let Src=Excel.Workbook(\"s.xlsx\") in Src", "analysis": {"sources": ["Excel"]}}],
+        "measures": {"SalesData.TotalAmount": "SUM(SalesData[Amount])"},
+        "calculated_columns": {"SalesData.TestCalc": "[Amount] * 2"},
+        "report_pages": [{"name": "Overview", "visuals": [{"type": "card", "title": "Total Sales Card", "fields_used": ["SalesData.TotalAmount"]}]}],
+        "relationships": []
     }
-    queries = ["list m queries", "m query for table SalesData", "power query for WebSourceTable", "list tables"]
-    print("--- Chatbot Logic Test (M Queries Focus) ---")
-    for q_idx, q in enumerate(queries):
-        print(f"\n--- Query {q_idx+1} ---\nUSER: {q}\nBOT: {process_query(q, dummy_metadata)}")
+    print("--- PBIT Chatbot Logic Test ---")
+    pbit_queries = [
+        "list tables", "m query for table SalesData", "describe table ProductInfo",
+        "formula for measure SalesData.TotalAmount", "list calculated columns",
+        "formula for calculated column SalesData.TestCalc", "list pages", "visuals on page Overview"
+    ]
+    for q in pbit_queries:
+        print(f"USER: {q}\nBOT: {process_query(q, dummy_pbit_metadata, 'pbit', None)}\n")
+
+    # Dummy PBIXRay object (mocked for testing PBIX path)
+    class MockPBIXRay:
+        def __init__(self):
+            self.tables = ["Customer", "Sales"]
+            self.schema = pd.DataFrame({
+                'TableName': ['Customer', 'Customer', 'Sales', 'Sales'],
+                'ColumnName': ['CustomerID', 'CustomerName', 'OrderID', 'Amount'],
+                'PandasDataType': ['Int64', 'string', 'Int64', 'Float64']
+            })
+            self.dax_measures_df = pd.DataFrame({
+                'TableName': ['Sales'], 'Name': ['Total Sales'], 'Expression': ['SUM(Sales[Amount])'],
+                'DisplayFolder': [None], 'Description': [None]
+            })
+            self.dax_columns_df = pd.DataFrame({
+                'TableName': ['Sales'], 'ColumnName': ['ExtendedPrice'], 'Expression': ['Sales[Amount] * Sales[Quantity]']
+            })
+            self.relationships = pd.DataFrame({
+                'FromTableName': ['Customer'], 'FromColumnName': ['CustomerID'],
+                'ToTableName': ['Sales'], 'ToColumnName': ['CustomerID'],
+                'IsActive': [True], 'Cardinality': ['1:M'], 'CrossFilteringBehavior': ['Single']
+            })
+            self.power_query = pd.DataFrame({
+                'TableName': ['Customer_PQ'], 'Expression': ['let Source = Sql.Database("server", "db") in Source']
+            })
+        def get_table(self, table_name):
+            if table_name == "Customer":
+                return pd.DataFrame({'CustomerID': [1,2], 'CustomerName': ['A', 'B']})
+            return pd.DataFrame()
+
+    dummy_pbix_object = MockPBIXRay()
+    dummy_pbix_report_layout = [
+        {"name": "Sales Summary", "visuals": [{"type": "barChart", "title": "Sales by Region", "fields_used": ["Sales.Region", "Sales.Total Sales"]}]}
+    ]
+    print("\n--- PBIX Chatbot Logic Test ---")
+    pbix_queries = [
+        "list tables", "describe table Customer", "show data for table Customer",
+        "list measures", "m query for table Customer_PQ", "list relationships",
+        "list calculated columns", "formula for calculated column Sales.ExtendedPrice",
+        "list pages", "visuals on page Sales Summary"
+    ]
+    for q in pbix_queries:
+        print(f"USER: {q}\nBOT: {process_query(q, dummy_pbix_object, 'pbix', dummy_pbix_report_layout)}\n")
+    
+    print(f"USER: visuals on page NonExistentPage\nBOT: {process_query('visuals on page NonExistentPage', dummy_pbix_object, 'pbix', dummy_pbix_report_layout)}\n")
+    print(f"USER: list pages (no report layout)\nBOT: {process_query('list pages', dummy_pbix_object, 'pbix', None)}\n")

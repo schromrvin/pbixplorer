@@ -1,2 +1,11 @@
 streamlit>=1.10.0,<2.0.0
-pandas>=1.0.0 
+pandas>=1.0.0
+apsw
+kaitaistruct
+xpress9 # Added for PBIXRay
+# Note: PBIXRay also requires the 'xpress9' decompression library.
+# This is typically a compiled library (C/C++ with Python bindings).
+# You will need to ensure it's installed in your environment.
+# The 'xpress9.py' file in PBIXRay is a Python interface to this library.
+# Installation might involve: pip install xpress9 (if available on PyPI)
+# or installing from a specific wheel file.
