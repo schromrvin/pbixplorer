@@ -46,6 +46,12 @@
     *   Search functionality within most explorer categories.
 *   **Local Processing for File Parsing:** Core file unpacking and metadata structuring occur locally. API calls are made to Gemini for NLU and response generation.
 
+## Demo Streamlit App 👨‍💻
+
+You can test the app hosted at **https://pbixplorer.streamlit.app/**.
+
+*(sample .pbit files can be found in the [templates](templates) folder of the repository)*
+
 ## 🤔 Why PBIXplorer?
 
 *   **Deep Insights:** Go beyond basic metadata. Understand data relationships, DAX logic, M transformations, and get AI-assisted analysis of your Power BI files.
@@ -70,7 +76,7 @@ PBIXplorer-analyzer/
 ├── .gitignore
 ├── app.py # Main Streamlit application
 ├── chatbot_logic.py # Gemini API interaction, prompt construction, RAG logic
-├── pbit_parser.py # Parses .pbit metadata and Report/Layout from PBIX
+├── pbit_parser.py # Parses .pbit metadata and Report/Layout from .pbix
 ├── README.md # This file
 └── requirements.txt # Python dependencies
 ```
