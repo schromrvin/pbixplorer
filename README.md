@@ -50,7 +50,7 @@
 
 You can test the app hosted at **https://pbixplorer.streamlit.app/**.
 
-*(sample .pbit files can be found in the [templates](templates) folder of the repository)*
+*(sample .pbit/.pbix files can be found in the [templates](templates) folder of the repository)*
 
 ## 🤔 Why PBIXplorer?
 
