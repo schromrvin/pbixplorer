@@ -4,3 +4,4 @@ apsw
 kaitaistruct
 xpress9 # Added for PBIXRay
 google-generativeai>=0.3.0
+tabulate
